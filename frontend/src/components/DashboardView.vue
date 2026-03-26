@@ -364,7 +364,7 @@
             :class="{ active: includeHistogramAggregate }"
             @click="includeHistogramAggregate = !includeHistogramAggregate"
           >
-            Все вместе
+            {{ selectedHistogramGroupColumn === "__year__" ? "Выбранные годы вместе" : "Выбранные срезы вместе" }}
           </button>
           <button
             v-for="value in histogramGroupValues"
@@ -1252,6 +1252,12 @@ function resolveHistogramSliceValue(row) {
   return normalizeCategory(row[selectedHistogramGroupColumn.value]);
 }
 
+function rowMatchesSelectedHistogramSlices(row, selectedSlices) {
+  if (!selectedHistogramGroupColumn.value) return true;
+  if (!selectedSlices.length) return true;
+  return selectedSlices.includes(resolveHistogramSliceValue(row));
+}
+
 const histogramData = computed(() => {
   if (!selectedHistogramColumn.value) return [];
 
@@ -1267,7 +1273,10 @@ const histogramData = computed(() => {
 
   const traceGroups = [];
   if (includeHistogramAggregate.value) {
-    traceGroups.push({ label: "Все вместе", rows: props.rows });
+    traceGroups.push({
+      label: selectedHistogramGroupColumn.value === "__year__" ? "Выбранные годы вместе" : "Все вместе",
+      rows: props.rows.filter((row) => rowMatchesSelectedHistogramSlices(row, selectedSlices)),
+    });
   }
 
   if (selectedHistogramGroupColumn.value) {
