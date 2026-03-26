@@ -20,6 +20,20 @@ from app.schemas.analysis import (
 NUMERIC_PARSE_THRESHOLD = 0.8
 DATETIME_PARSE_THRESHOLD = 0.8
 MIN_NON_NULL_FOR_ANALYSIS = 5
+DATETIME_NAME_TOKENS = (
+    "date",
+    "datetime",
+    "time",
+    "timestamp",
+    "year",
+    "month",
+    "day",
+    "дата",
+    "время",
+    "год",
+    "месяц",
+    "день",
+)
 
 
 def read_excel_to_dataframe(contents: bytes, filename: str) -> pd.DataFrame:
@@ -46,6 +60,11 @@ def to_json_safe(value):
 
 def normalize_lookup_value(value: str) -> str:
     return str(value).strip().casefold()
+
+
+def is_datetime_like_column_name(column_name: str) -> bool:
+    normalized = normalize_lookup_value(column_name)
+    return any(token in normalized for token in DATETIME_NAME_TOKENS)
 
 
 def resolve_target_column(requested_target: str | None, columns: list[str]) -> str | None:
@@ -129,7 +148,22 @@ def coerce_numeric_series(series: pd.Series) -> pd.Series:
 def coerce_datetime_series(series: pd.Series) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(series):
         return pd.to_datetime(series, errors="coerce")
-    return pd.to_datetime(series, errors="coerce", dayfirst=True)
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_datetime(series, errors="coerce", unit="D", origin="1899-12-30")
+
+    string_series = series.astype("string").str.strip()
+    parsed = pd.to_datetime(string_series, errors="coerce", dayfirst=True)
+
+    numeric_series = coerce_numeric_series(series)
+    numeric_mask = parsed.isna() & numeric_series.notna()
+    if numeric_mask.any():
+        parsed.loc[numeric_mask] = pd.to_datetime(
+            numeric_series.loc[numeric_mask],
+            errors="coerce",
+            unit="D",
+            origin="1899-12-30",
+        )
+    return parsed
 
 
 def classify_columns(
@@ -152,6 +186,14 @@ def classify_columns(
             categorical_columns.append(column)
             feature_df[column] = raw_series.astype("string")
             continue
+
+        if is_datetime_like_column_name(column):
+            datetime_series = coerce_datetime_series(raw_series)
+            datetime_count = int(datetime_series.notna().sum())
+            if datetime_count / non_null_count >= min(DATETIME_PARSE_THRESHOLD, 0.5):
+                feature_df[column] = datetime_series
+                datetime_columns.append(column)
+                continue
 
         numeric_series = coerce_numeric_series(raw_series)
         numeric_count = int(numeric_series.notna().sum())

@@ -92,6 +92,7 @@ input {
   display: grid;
   gap: 20px;
   align-content: start;
+  min-width: 0;
 }
 
 .panel {
@@ -301,10 +302,12 @@ input {
 .dashboard-grid {
   display: grid;
   gap: 20px;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .plotly-chart {
   min-height: 320px;
+  width: 100%;
 }
 
 .table-wrap {
@@ -335,6 +338,10 @@ input {
   top: 0;
   background: #eff6ff;
   z-index: 1;
+}
+
+.compact-table {
+  max-height: 420px;
 }
 
 .empty-state,
@@ -371,6 +378,10 @@ input {
   .hero {
     display: grid;
   }
+
+  .hero-badge {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
 }
 
 @media (max-width: 720px) {
@@ -387,5 +398,30 @@ input {
   .table-meta {
     flex-direction: column;
     gap: 6px;
+  }
+
+  .button-group {
+    gap: 8px;
+  }
+
+  .choice-button,
+  .file-button,
+  .primary-button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .selection-actions {
+    align-items: stretch;
+  }
+
+  .metric-card {
+    padding: 14px;
+  }
+
+  .data-table th,
+  .data-table td {
+    padding: 8px 10px;
+    font-size: 0.86rem;
   }
 }
