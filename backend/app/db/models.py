@@ -15,6 +15,7 @@ class Dataset(Base):
     target_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
     row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     columns_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    selected_features_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -37,4 +38,3 @@ class Record(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
     dataset: Mapped[Dataset] = relationship(back_populates="records")
-

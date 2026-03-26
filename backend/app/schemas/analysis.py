@@ -8,6 +8,7 @@ class DatasetSummary(BaseModel):
     name: str
     original_filename: str
     target_column: str | None
+    selected_features: list[str]
     row_count: int
     columns: list[str]
     created_at: datetime
@@ -20,6 +21,11 @@ class DatasetDetail(BaseModel):
 
 class UploadResponse(BaseModel):
     dataset: DatasetSummary
+
+
+class ColumnSelectionUpdate(BaseModel):
+    target_column: str | None = None
+    selected_features: list[str] = []
 
 
 class Overview(BaseModel):
@@ -55,4 +61,3 @@ class AnalysisResponse(BaseModel):
     categorical_columns: list[str]
     datetime_columns: list[str]
     notes: list[str]
-

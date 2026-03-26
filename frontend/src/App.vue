@@ -34,10 +34,19 @@
             </div>
             <div class="table-meta">
               <span>Целевая переменная: {{ selectedDataset.dataset.target_column || "Не указана" }}</span>
+              <span>Зависимых переменных: {{ selectedDataset.dataset.selected_features.length }}</span>
               <span>Строк: {{ selectedDataset.dataset.row_count }}</span>
               <span>Колонок: {{ selectedDataset.dataset.columns.length }}</span>
             </div>
           </section>
+
+          <SelectionPanel
+            :columns="selectedDataset.dataset.columns"
+            :target-column="selectedDataset.dataset.target_column || ''"
+            :selected-features="selectedDataset.dataset.selected_features"
+            :saving="savingSelection"
+            @save="handleSelectionSave"
+          />
 
           <DashboardView
             :analysis="selectedAnalysis"
@@ -62,8 +71,15 @@ import { onMounted, ref } from "vue";
 import DashboardView from "./components/DashboardView.vue";
 import DatasetList from "./components/DatasetList.vue";
 import RawTable from "./components/RawTable.vue";
+import SelectionPanel from "./components/SelectionPanel.vue";
 import UploadPanel from "./components/UploadPanel.vue";
-import { fetchAnalysis, fetchDataset, listDatasets, uploadDataset } from "./services/api";
+import {
+  fetchAnalysis,
+  fetchDataset,
+  listDatasets,
+  updateDatasetSelection,
+  uploadDataset,
+} from "./services/api";
 
 const datasets = ref([]);
 const selectedDatasetId = ref(null);
@@ -71,6 +87,7 @@ const selectedDataset = ref(null);
 const selectedAnalysis = ref(null);
 const uploading = ref(false);
 const loadingData = ref(false);
+const savingSelection = ref(false);
 const errorMessage = ref("");
 
 async function refreshDatasets() {
@@ -106,6 +123,29 @@ async function handleUpload(payload) {
     errorMessage.value = error.message;
   } finally {
     uploading.value = false;
+  }
+}
+
+async function handleSelectionSave(payload) {
+  if (!selectedDatasetId.value) {
+    return;
+  }
+
+  try {
+    savingSelection.value = true;
+    errorMessage.value = "";
+    const updatedDataset = await updateDatasetSelection(selectedDatasetId.value, payload);
+    if (selectedDataset.value) {
+      selectedDataset.value = {
+        ...selectedDataset.value,
+        dataset: updatedDataset,
+      };
+    }
+    selectedAnalysis.value = await fetchAnalysis(selectedDatasetId.value);
+  } catch (error) {
+    errorMessage.value = error.message;
+  } finally {
+    savingSelection.value = false;
   }
 }
 

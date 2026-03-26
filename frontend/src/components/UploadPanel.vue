@@ -2,18 +2,13 @@
   <section class="panel upload-panel">
     <div class="panel-header">
       <h2>Загрузка Excel</h2>
-      <p>Файл выбирается через проводник, целевая переменная вводится отдельной строкой.</p>
+      <p>После загрузки сервис распознает заголовки и предложит выбрать target и зависимые переменные кнопками.</p>
     </div>
 
     <form class="upload-form" @submit.prevent="handleSubmit">
       <label class="field">
         <span>Название набора</span>
         <input v-model.trim="datasetName" type="text" placeholder="Например, Скважины март" required />
-      </label>
-
-      <label class="field">
-        <span>Целевая переменная</span>
-        <input v-model.trim="targetColumnName" type="text" placeholder="Введите имя колонки" />
       </label>
 
       <label class="file-picker">
@@ -43,7 +38,6 @@ defineProps({
 
 const file = ref(null);
 const datasetName = ref("");
-const targetColumnName = ref("");
 
 const selectedFileName = computed(() => file.value?.name || "Файл не выбран");
 
@@ -59,7 +53,6 @@ function handleSubmit() {
 
   emit("upload", {
     datasetName: datasetName.value,
-    targetColumnName: targetColumnName.value,
     file: file.value,
   });
 }

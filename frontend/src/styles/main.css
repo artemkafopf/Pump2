@@ -267,6 +267,14 @@ input {
   gap: 10px;
 }
 
+.selection-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .choice-button {
   padding: 9px 14px;
   border-radius: 999px;

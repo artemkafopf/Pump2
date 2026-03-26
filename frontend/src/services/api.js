@@ -19,10 +19,9 @@ export async function listDatasets() {
   return parseResponse(response);
 }
 
-export async function uploadDataset({ datasetName, targetColumnName, file }) {
+export async function uploadDataset({ datasetName, file }) {
   const formData = new FormData();
   formData.append("dataset_name", datasetName);
-  formData.append("target_column_name", targetColumnName || "");
   formData.append("file", file);
 
   const response = await fetch(`${API_BASE_URL}/datasets/upload`, {
@@ -39,5 +38,19 @@ export async function fetchDataset(datasetId) {
 
 export async function fetchAnalysis(datasetId) {
   const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/analysis`);
+  return parseResponse(response);
+}
+
+export async function updateDatasetSelection(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/selection`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      target_column: payload.targetColumn,
+      selected_features: payload.selectedFeatures,
+    }),
+  });
   return parseResponse(response);
 }

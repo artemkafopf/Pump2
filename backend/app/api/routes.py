@@ -4,7 +4,13 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
 from app.db.models import Dataset, Record
-from app.schemas.analysis import AnalysisResponse, DatasetDetail, DatasetSummary, UploadResponse
+from app.schemas.analysis import (
+    AnalysisResponse,
+    ColumnSelectionUpdate,
+    DatasetDetail,
+    DatasetSummary,
+    UploadResponse,
+)
 from app.services.analysis import (
     build_analysis_response,
     build_dataset_detail,
@@ -27,7 +33,6 @@ def list_datasets(db: Session = Depends(get_db)):
 @router.post("/datasets/upload", response_model=UploadResponse)
 async def upload_dataset(
     dataset_name: str = Form(...),
-    target_column_name: str = Form(""),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -47,19 +52,11 @@ async def upload_dataset(
 
     original_columns = [str(column) for column in df.columns.tolist()]
     df.columns = original_columns
-    requested_target = target_column_name.strip() or None
-    target_column = resolve_target_column(requested_target, original_columns)
-
-    if requested_target and target_column is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Target column '{target_column_name}' was not found in the uploaded file.",
-        )
-
     dataset = Dataset(
         name=dataset_name.strip(),
         original_filename=filename,
-        target_column=target_column,
+        target_column=None,
+        selected_features_json=[],
         row_count=int(len(df)),
         columns_json=original_columns,
     )
@@ -79,6 +76,32 @@ async def upload_dataset(
     db.commit()
     db.refresh(dataset)
     return build_upload_response(dataset)
+
+
+@router.patch("/datasets/{dataset_id}/selection", response_model=DatasetSummary)
+def update_dataset_selection(dataset_id: int, payload: ColumnSelectionUpdate, db: Session = Depends(get_db)):
+    dataset = db.scalar(select(Dataset).where(Dataset.id == dataset_id))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    target_column = None
+    if payload.target_column:
+        target_column = resolve_target_column(payload.target_column, list(dataset.columns_json))
+        if target_column is None:
+            raise HTTPException(status_code=400, detail="Selected target column was not found.")
+
+    selected_features: list[str] = []
+    for column in payload.selected_features:
+        resolved = resolve_target_column(column, list(dataset.columns_json))
+        if resolved and resolved != target_column and resolved not in selected_features:
+            selected_features.append(resolved)
+
+    dataset.target_column = target_column
+    dataset.selected_features_json = selected_features
+    db.add(dataset)
+    db.commit()
+    db.refresh(dataset)
+    return dataset_to_summary(dataset)
 
 
 @router.get("/datasets/{dataset_id}", response_model=DatasetDetail)

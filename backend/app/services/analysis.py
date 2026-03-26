@@ -64,6 +64,7 @@ def dataset_to_summary(dataset: Dataset) -> DatasetSummary:
         name=dataset.name,
         original_filename=dataset.original_filename,
         target_column=dataset.target_column,
+        selected_features=list(dataset.selected_features_json),
         row_count=dataset.row_count,
         columns=list(dataset.columns_json),
         created_at=dataset.created_at,
@@ -87,6 +88,18 @@ def records_to_dataframe(records: list[Record], columns: list[str]) -> pd.DataFr
     if not rows:
         return pd.DataFrame(columns=columns)
     return pd.DataFrame(rows, columns=columns)
+
+
+def get_analysis_columns(dataset: Dataset, df: pd.DataFrame) -> list[str]:
+    available_columns = [column for column in list(dataset.columns_json) if column in df.columns]
+    selected_features = [
+        column
+        for column in list(dataset.selected_features_json)
+        if column in available_columns and column != dataset.target_column
+    ]
+    if selected_features:
+        return selected_features
+    return [column for column in available_columns if column != dataset.target_column]
 
 
 def coerce_numeric_series(series: pd.Series) -> pd.Series:
@@ -122,8 +135,12 @@ def coerce_datetime_series(series: pd.Series) -> pd.Series:
 def classify_columns(
     df: pd.DataFrame,
     target_column: str | None,
+    selected_columns: list[str] | None = None,
 ) -> tuple[pd.DataFrame, list[str], list[str], list[str]]:
     feature_df = df.drop(columns=[target_column], errors="ignore").copy()
+    if selected_columns is not None:
+        filtered = [column for column in selected_columns if column in feature_df.columns]
+        feature_df = feature_df[filtered]
     numeric_columns: list[str] = []
     categorical_columns: list[str] = []
     datetime_columns: list[str] = []
@@ -162,9 +179,9 @@ def build_target_series(df: pd.DataFrame, target_column: str | None) -> pd.Serie
     return coerce_numeric_series(df[target_column])
 
 
-def build_overview(df: pd.DataFrame, target_column: str | None) -> Overview:
+def build_overview(df: pd.DataFrame, target_column: str | None, selected_columns: list[str] | None = None) -> Overview:
     target = build_target_series(df, target_column)
-    _, numeric_columns, categorical_columns, datetime_columns = classify_columns(df, target_column)
+    _, numeric_columns, categorical_columns, datetime_columns = classify_columns(df, target_column, selected_columns)
     denominator = df.shape[0] * max(df.shape[1], 1)
     missing_share = float(df.isna().sum().sum() / denominator) if denominator else 0.0
     valid_target = target.dropna()
@@ -270,14 +287,21 @@ def build_feature_importance(df: pd.DataFrame, target_column: str | None) -> lis
 
 def build_analysis_response(dataset: Dataset, records: list[Record]) -> AnalysisResponse:
     df = records_to_dataframe(records, list(dataset.columns_json))
-    overview = build_overview(df, dataset.target_column)
-    correlations, numeric_columns, categorical_columns, datetime_columns = build_correlations(df, dataset.target_column)
+    selected_columns = get_analysis_columns(dataset, df)
+    overview = build_overview(df, dataset.target_column, selected_columns)
+    correlations, numeric_columns, categorical_columns, datetime_columns = build_correlations_with_selection(
+        df,
+        dataset.target_column,
+        selected_columns,
+    )
     notes: list[str] = []
 
     if dataset.target_column is None:
         notes.append("Target column was not set.")
     elif overview.valid_target_rows == 0:
         notes.append("Target column does not contain enough numeric values for CatBoost analysis.")
+    if not selected_columns:
+        notes.append("Dependent variables were not selected.")
     if overview.total_rows < 20:
         notes.append("Dataset is small, so relationships may be unstable.")
 
@@ -285,9 +309,109 @@ def build_analysis_response(dataset: Dataset, records: list[Record]) -> Analysis
         dataset=dataset_to_summary(dataset),
         overview=overview,
         correlations=correlations,
-        feature_importance=build_feature_importance(df, dataset.target_column),
+        feature_importance=build_feature_importance_with_selection(df, dataset.target_column, selected_columns),
         numeric_columns=numeric_columns,
         categorical_columns=categorical_columns,
         datetime_columns=datetime_columns,
         notes=notes,
     )
+
+
+def build_correlations_with_selection(
+    df: pd.DataFrame,
+    target_column: str | None,
+    selected_columns: list[str],
+) -> tuple[list[CorrelationItem], list[str], list[str], list[str]]:
+    target = build_target_series(df, target_column)
+    if target.empty:
+        return [], [], [], []
+
+    clean = df.copy()
+    clean["_target_numeric"] = target
+    clean = clean[clean["_target_numeric"].notna()].copy()
+    if clean.empty:
+        return [], [], [], []
+
+    feature_df, numeric_columns, categorical_columns, datetime_columns = classify_columns(
+        clean,
+        target_column,
+        selected_columns,
+    )
+    correlations: list[CorrelationItem] = []
+
+    for column in numeric_columns:
+        series = coerce_numeric_series(feature_df[column])
+        if int(series.notna().sum()) < MIN_NON_NULL_FOR_ANALYSIS:
+            continue
+        corr = series.corr(clean["_target_numeric"])
+        if pd.notna(corr):
+            correlations.append(CorrelationItem(feature=column, correlation=float(corr)))
+
+    for column in datetime_columns:
+        series = pd.to_datetime(feature_df[column], errors="coerce")
+        numeric_time = series.map(lambda value: value.timestamp() if pd.notna(value) else pd.NA)
+        numeric_time = pd.to_numeric(numeric_time, errors="coerce")
+        if int(numeric_time.notna().sum()) < MIN_NON_NULL_FOR_ANALYSIS:
+            continue
+        corr = numeric_time.corr(clean["_target_numeric"])
+        if pd.notna(corr):
+            correlations.append(CorrelationItem(feature=column, correlation=float(corr)))
+
+    correlations.sort(key=lambda item: abs(item.correlation), reverse=True)
+    return correlations[:25], numeric_columns, categorical_columns, datetime_columns
+
+
+def build_feature_importance_with_selection(
+    df: pd.DataFrame,
+    target_column: str | None,
+    selected_columns: list[str],
+) -> list[FeatureImportanceItem]:
+    target = build_target_series(df, target_column)
+    if target.empty:
+        return []
+
+    clean = df.copy()
+    clean["_target_numeric"] = target
+    clean = clean[clean["_target_numeric"].notna()].copy()
+    if clean.empty or clean["_target_numeric"].nunique() < 2:
+        return []
+
+    feature_df, numeric_columns, categorical_columns, datetime_columns = classify_columns(
+        clean,
+        target_column,
+        selected_columns,
+    )
+    if feature_df.empty:
+        return []
+
+    prepared = pd.DataFrame(index=feature_df.index)
+    for column in numeric_columns:
+        prepared[column] = coerce_numeric_series(feature_df[column])
+    for column in datetime_columns:
+        dt_series = pd.to_datetime(feature_df[column], errors="coerce")
+        prepared[column] = dt_series.map(lambda value: value.timestamp() if pd.notna(value) else None)
+    for column in categorical_columns:
+        prepared[column] = feature_df[column].astype("string").fillna("__missing__")
+
+    if prepared.empty:
+        return []
+
+    categorical_feature_indices = [prepared.columns.get_loc(column) for column in categorical_columns]
+    model = CatBoostRegressor(
+        iterations=400,
+        depth=6,
+        learning_rate=0.05,
+        loss_function="RMSE",
+        eval_metric="RMSE",
+        random_seed=42,
+        verbose=False,
+        allow_writing_files=False,
+    )
+    model.fit(Pool(prepared, clean["_target_numeric"], cat_features=categorical_feature_indices))
+
+    items = [
+        FeatureImportanceItem(feature=feature, importance=float(importance))
+        for feature, importance in zip(prepared.columns.tolist(), model.get_feature_importance(), strict=False)
+    ]
+    items.sort(key=lambda item: item.importance, reverse=True)
+    return items[:25]
