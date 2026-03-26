@@ -140,9 +140,41 @@
             </button>
           </div>
         </div>
+
+        <div v-if="availableYears.length" class="range-grid">
+          <label class="field">
+            <span>Год от: {{ selectedYearMin ?? "-" }}</span>
+            <input v-model.number="selectedYearMin" type="range" :min="availableYears[0]" :max="availableYears[availableYears.length - 1]" step="1" />
+          </label>
+          <label class="field">
+            <span>Год до: {{ selectedYearMax ?? "-" }}</span>
+            <input v-model.number="selectedYearMax" type="range" :min="availableYears[0]" :max="availableYears[availableYears.length - 1]" step="1" />
+          </label>
+        </div>
       </div>
 
-      <PlotlyChart :data="timeSeriesData" :layout="timeSeriesLayout" />
+      <div class="time-summary-grid">
+        <div class="time-summary-plot">
+          <PlotlyChart :data="timeSeriesData" :layout="timeSeriesLayout" />
+        </div>
+
+        <div v-if="timeSummaryTable.headers.length" class="table-wrap compact-table">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>{{ selectedGroupColumn || "Группа" }}</th>
+                <th v-for="year in timeSummaryTable.headers" :key="`time-table-${year}`">{{ year }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in timeSummaryTable.rows" :key="row.label">
+                <td>{{ row.label }}</td>
+                <td v-for="year in timeSummaryTable.headers" :key="`${row.label}-${year}`">{{ row.values[year] ?? "-" }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <section class="panel">
@@ -307,6 +339,46 @@
         </div>
       </div>
 
+      <div class="control-group">
+        <span class="control-title">Срезы</span>
+        <div class="button-group">
+          <button
+            v-for="option in histogramGroupOptions"
+            :key="`hist-group-${option.value}`"
+            type="button"
+            class="choice-button"
+            :class="{ active: option.value === selectedHistogramGroupColumn }"
+            @click="selectedHistogramGroupColumn = option.value"
+          >
+            {{ option.label }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="selectedHistogramGroupColumn" class="control-group">
+        <span class="control-title">Значения срезов</span>
+        <div class="button-group">
+          <button
+            type="button"
+            class="choice-button"
+            :class="{ active: includeHistogramAggregate }"
+            @click="includeHistogramAggregate = !includeHistogramAggregate"
+          >
+            Все вместе
+          </button>
+          <button
+            v-for="value in histogramGroupValues"
+            :key="`hist-group-value-${value}`"
+            type="button"
+            class="choice-button"
+            :class="{ active: selectedHistogramGroupValues.includes(value) }"
+            @click="selectedHistogramGroupValues = selectedHistogramGroupValues.includes(value) ? selectedHistogramGroupValues.filter((item) => item !== value) : [...selectedHistogramGroupValues, value]"
+          >
+            {{ value }}
+          </button>
+        </div>
+      </div>
+
       <PlotlyChart :data="histogramData" :layout="histogramLayout" />
     </section>
   </section>
@@ -328,9 +400,14 @@ const viewportWidth = ref(typeof window === "undefined" ? 1440 : window.innerWid
 const selectedTimeColumn = ref("");
 const selectedGroupColumn = ref("");
 const selectedGroupValues = ref([]);
+const selectedYearMin = ref(null);
+const selectedYearMax = ref(null);
 const selectedScatterX = ref("");
 const selectedScatterY = ref("");
 const selectedHistogramColumn = ref("");
+const selectedHistogramGroupColumn = ref("");
+const selectedHistogramGroupValues = ref([]);
+const includeHistogramAggregate = ref(true);
 const selectedHeatmapColorBy = ref("__count__");
 const selectedScatterColorBy = ref("__none__");
 const scatterXMinPercent = ref(0);
@@ -456,6 +533,22 @@ function normalizeCategory(value) {
   return value === null || value === undefined || value === "" ? "Пусто" : String(value);
 }
 
+function extractYearValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = toNumeric(value);
+  if (numeric !== null) {
+    const rounded = Math.trunc(numeric);
+    if (rounded >= 1900 && rounded <= 2100) return rounded;
+  }
+
+  const match = String(value).match(/(19|20)\d{2}/);
+  if (match) return Number(match[0]);
+
+  const parsed = parseDateFromString(value);
+  if (parsed) return parsed.getUTCFullYear();
+  return null;
+}
+
 function formatAxisValue(column, value) {
   if (value === null || value === undefined) return "n/a";
   if (dateColumnSet.value.has(column)) return formatDateLabel(new Date(value));
@@ -488,25 +581,11 @@ const inferredNumericColumns = computed(() =>
   }),
 );
 
-const inferredDateColumns = computed(() =>
-  props.columns.filter((column) => {
-    const valid = props.rows
-      .map((row) => {
-        const numeric = toNumeric(row[column]);
-        if (numeric !== null && isPossibleExcelDate(numeric)) return excelSerialToDate(numeric);
-        return parseDateFromString(row[column]);
-      })
-      .filter(Boolean);
-    return valid.length >= 3 && valid.length / Math.max(props.rows.length, 1) >= 0.4;
-  }),
+const dateColumnSet = computed(() => new Set());
+
+const availableTimeColumns = computed(() =>
+  props.columns.filter((column) => column !== props.analysis.dataset.target_column),
 );
-
-const dateColumnSet = computed(() => new Set([...(props.analysis.datetime_columns || []), ...inferredDateColumns.value]));
-
-const availableTimeColumns = computed(() => {
-  const merged = new Set(dateColumnSet.value);
-  return Array.from(merged);
-});
 
 const scatterColumns = computed(() => {
   const merged = new Set([
@@ -518,6 +597,19 @@ const scatterColumns = computed(() => {
 });
 
 const allColumns = computed(() => props.columns);
+
+const histogramGroupOptions = computed(() => {
+  const options = [{ value: "", label: "Без срезов" }];
+  for (const column of props.columns) {
+    if (column !== selectedHistogramColumn.value) {
+      options.push({ value: column, label: column });
+    }
+  }
+  if (selectedTimeColumn.value) {
+    options.push({ value: "__year__", label: "Год" });
+  }
+  return options;
+});
 
 const heatmapColorOptions = computed(() => {
   const options = [{ value: "__count__", label: "Плотность точек" }];
@@ -548,6 +640,24 @@ const scatterColorOptions = computed(() => {
     }
   }
   return options;
+});
+
+const histogramGroupValues = computed(() => {
+  if (!selectedHistogramGroupColumn.value) return [];
+  if (selectedHistogramGroupColumn.value === "__year__") {
+    return availableYears.value.map((year) => String(year));
+  }
+  const values = new Set();
+  for (const row of props.rows) values.add(normalizeCategory(row[selectedHistogramGroupColumn.value]));
+  return Array.from(values).slice(0, 30);
+});
+
+const availableYears = computed(() => {
+  if (!selectedTimeColumn.value) return [];
+  const years = props.rows
+    .map((row) => extractYearValue(row[selectedTimeColumn.value]))
+    .filter((value) => value !== null);
+  return Array.from(new Set(years)).sort((a, b) => a - b);
 });
 
 watch(
@@ -597,6 +707,43 @@ watch(
 
 watch(selectedGroupColumn, () => {
   selectedGroupValues.value = [];
+});
+
+watch(
+  availableYears,
+  (years) => {
+    if (!years.length) {
+      selectedYearMin.value = null;
+      selectedYearMax.value = null;
+      return;
+    }
+    if (selectedYearMin.value === null || !years.includes(selectedYearMin.value)) {
+      selectedYearMin.value = years[0];
+    }
+    if (selectedYearMax.value === null || !years.includes(selectedYearMax.value)) {
+      selectedYearMax.value = years[years.length - 1];
+    }
+    if (selectedYearMin.value > selectedYearMax.value) {
+      selectedYearMax.value = selectedYearMin.value;
+    }
+  },
+  { immediate: true },
+);
+
+watch(selectedYearMin, (value) => {
+  if (selectedYearMax.value !== null && value !== null && value > selectedYearMax.value) {
+    selectedYearMax.value = value;
+  }
+});
+
+watch(selectedYearMax, (value) => {
+  if (selectedYearMin.value !== null && value !== null && value < selectedYearMin.value) {
+    selectedYearMin.value = value;
+  }
+});
+
+watch(selectedHistogramGroupColumn, () => {
+  selectedHistogramGroupValues.value = [];
 });
 
 const groupableColumns = computed(() =>
@@ -673,16 +820,17 @@ const timeSeriesData = computed(() => {
 
   const aggregateMap = new Map();
   for (const row of props.rows) {
-    const timeValue = toDate(row[selectedTimeColumn.value], selectedTimeColumn.value);
+    const year = extractYearValue(row[selectedTimeColumn.value]);
     const targetValue = toNumeric(row[targetColumn]);
-    if (!timeValue || targetValue === null || targetValue === 0) continue;
+    if (year === null || targetValue === null || targetValue === 0) continue;
+    if (selectedYearMin.value !== null && year < selectedYearMin.value) continue;
+    if (selectedYearMax.value !== null && year > selectedYearMax.value) continue;
 
     const groupValue = selectedGroupColumn.value ? normalizeCategory(row[selectedGroupColumn.value]) : "Все";
     if (selectedGroupColumn.value && selectedGroupValues.value.length > 0 && !selectedGroupValues.value.includes(groupValue)) continue;
 
-    const bucketDate = new Date(Date.UTC(timeValue.getUTCFullYear(), timeValue.getUTCMonth(), 1));
-    const key = `${groupValue}__${bucketDate.toISOString()}`;
-    const current = aggregateMap.get(key) || { group: groupValue, date: bucketDate, values: [] };
+    const key = `${groupValue}__${year}`;
+    const current = aggregateMap.get(key) || { group: groupValue, x: year, xSort: year, values: [] };
     current.values.push(targetValue);
     aggregateMap.set(key, current);
   }
@@ -691,19 +839,22 @@ const timeSeriesData = computed(() => {
   for (const item of aggregateMap.values()) {
     const line = byGroup.get(item.group) || [];
     if (!item.values.length) continue;
-    line.push({ x: item.date, y: item.values.reduce((sum, value) => sum + value, 0) / item.values.length });
+    line.push({ x: item.x, xSort: item.xSort, y: item.values.reduce((sum, value) => sum + value, 0) / item.values.length });
     byGroup.set(item.group, line);
   }
 
   return Array.from(byGroup.entries()).map(([group, points]) => {
-    const sortedPoints = points.sort((a, b) => a.x - b.x);
+    const sortedPoints = points.sort((a, b) => {
+      if (typeof a.xSort === "number" && typeof b.xSort === "number") return a.xSort - b.xSort;
+      return String(a.xSort).localeCompare(String(b.xSort), "ru");
+    });
     return {
       type: "scatter",
       mode: "lines+markers",
       name: group,
       x: sortedPoints.map((point) => point.x),
       y: sortedPoints.map((point) => point.y),
-      hovertemplate: "%{x|%d.%m.%Y}<br>Среднее: %{y:.2f}<extra>" + group + "</extra>",
+      hovertemplate: "Год: %{x}<br>Среднее: %{y:.1f}<extra>" + group + "</extra>",
     };
   });
 });
@@ -715,14 +866,52 @@ const timeSeriesLayout = computed(() => ({
   paper_bgcolor: "rgba(0,0,0,0)",
   plot_bgcolor: "rgba(0,0,0,0)",
   xaxis: {
-    title: selectedTimeColumn.value || "Дата",
-    type: "date",
-    tickformat: "%d.%m.%Y",
+    title: "Год",
   },
   yaxis: {
     title: props.analysis.dataset.target_column || "Target",
   },
 }));
+
+const timeSummaryTable = computed(() => {
+  const targetColumn = props.analysis.dataset.target_column;
+  if (!targetColumn || !selectedTimeColumn.value) return { headers: [], rows: [] };
+
+  const grouped = new Map();
+  const years = new Set();
+
+  for (const row of props.rows) {
+    const year = extractYearValue(row[selectedTimeColumn.value]);
+    const targetValue = toNumeric(row[targetColumn]);
+    if (year === null || targetValue === null || targetValue === 0) continue;
+    if (selectedYearMin.value !== null && year < selectedYearMin.value) continue;
+    if (selectedYearMax.value !== null && year > selectedYearMax.value) continue;
+
+    const label = selectedGroupColumn.value ? normalizeCategory(row[selectedGroupColumn.value]) : "Все";
+    if (selectedGroupColumn.value && selectedGroupValues.value.length > 0 && !selectedGroupValues.value.includes(label)) continue;
+
+    years.add(String(year));
+    const key = `${label}__${year}`;
+    const current = grouped.get(key) || { label, year: String(year), values: [] };
+    current.values.push(targetValue);
+    grouped.set(key, current);
+  }
+
+  const headers = Array.from(years).sort();
+  const rowMap = new Map();
+
+  for (const item of grouped.values()) {
+    const currentRow = rowMap.get(item.label) || {};
+    const avg = item.values.reduce((sum, value) => sum + value, 0) / item.values.length;
+    currentRow[item.year] = formatOneDecimal(avg);
+    rowMap.set(item.label, currentRow);
+  }
+
+  return {
+    headers,
+    rows: Array.from(rowMap.entries()).map(([label, values]) => ({ label, values })),
+  };
+});
 
 const scatterBasePoints = computed(() => {
   if (!selectedScatterX.value || !selectedScatterY.value) return [];
@@ -1054,48 +1243,72 @@ const scatterHeatmapLayout = computed(() => ({
   },
 }));
 
+function resolveHistogramSliceValue(row) {
+  if (!selectedHistogramGroupColumn.value) return null;
+  if (selectedHistogramGroupColumn.value === "__year__") {
+    const year = selectedTimeColumn.value ? extractYearValue(row[selectedTimeColumn.value]) : null;
+    return year === null ? null : String(year);
+  }
+  return normalizeCategory(row[selectedHistogramGroupColumn.value]);
+}
+
 const histogramData = computed(() => {
   if (!selectedHistogramColumn.value) return [];
 
-  if (dateColumnSet.value.has(selectedHistogramColumn.value)) {
-    const counts = new Map();
-    for (const row of props.rows) {
-      const date = toDate(row[selectedHistogramColumn.value], selectedHistogramColumn.value);
-      if (!date) continue;
-      const label = formatMonthLabel(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)));
-      counts.set(label, (counts.get(label) || 0) + 1);
+  const palette = ["#1d4ed8", "#0f766e", "#ea580c", "#7c3aed", "#dc2626", "#0891b2", "#65a30d"];
+  const isNumericHistogram =
+    props.rows.map((row) => toNumeric(row[selectedHistogramColumn.value])).filter((value) => value !== null).length >=
+    Math.max(5, props.rows.length * 0.5);
+
+  const selectedSlices =
+    selectedHistogramGroupValues.value.length > 0
+      ? selectedHistogramGroupValues.value
+      : histogramGroupValues.value.slice(0, 6);
+
+  const traceGroups = [];
+  if (includeHistogramAggregate.value) {
+    traceGroups.push({ label: "Все вместе", rows: props.rows });
+  }
+
+  if (selectedHistogramGroupColumn.value) {
+    for (const value of selectedSlices) {
+      traceGroups.push({
+        label: value,
+        rows: props.rows.filter((row) => resolveHistogramSliceValue(row) === value),
+      });
     }
-    const entries = Array.from(counts.entries());
-    return [
-      {
-        type: "bar",
-        x: entries.map((item) => item[0]),
-        y: entries.map((item) => item[1]),
-        marker: { color: "#1d4ed8" },
-      },
-    ];
   }
 
-  const numericValues = props.rows.map((row) => toNumeric(row[selectedHistogramColumn.value])).filter((value) => value !== null);
-  if (numericValues.length >= Math.max(5, props.rows.length * 0.5)) {
-    return [{ type: "histogram", x: numericValues, marker: { color: "#1d4ed8" } }];
+  if (!traceGroups.length) {
+    traceGroups.push({ label: selectedHistogramColumn.value, rows: props.rows });
   }
 
-  const counts = new Map();
-  for (const row of props.rows) {
-    const key = normalizeCategory(row[selectedHistogramColumn.value]);
-    counts.set(key, (counts.get(key) || 0) + 1);
+  if (isNumericHistogram) {
+    return traceGroups.map((group, index) => ({
+      type: "histogram",
+      name: group.label,
+      x: group.rows.map((row) => toNumeric(row[selectedHistogramColumn.value])).filter((value) => value !== null),
+      marker: { color: palette[index % palette.length] },
+      opacity: 0.4,
+    }));
   }
 
-  const topValues = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 30);
-  return [
-    {
+  return traceGroups.map((group, index) => {
+    const counts = new Map();
+    for (const row of group.rows) {
+      const key = normalizeCategory(row[selectedHistogramColumn.value]);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const topValues = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 30);
+    return {
       type: "bar",
+      name: group.label,
       x: topValues.map((item) => item[0]),
       y: topValues.map((item) => item[1]),
-      marker: { color: "#9333ea" },
-    },
-  ];
+      marker: { color: palette[index % palette.length] },
+      opacity: 0.4,
+    };
+  });
 });
 
 const histogramLayout = computed(() => ({
@@ -1104,8 +1317,10 @@ const histogramLayout = computed(() => ({
   autosize: true,
   paper_bgcolor: "rgba(0,0,0,0)",
   plot_bgcolor: "rgba(0,0,0,0)",
+  barmode: "overlay",
   xaxis: { title: selectedHistogramColumn.value || "Column" },
   yaxis: { title: "Count" },
+  legend: { orientation: "h", y: 1.1 },
 }));
 
 function findSubsoilColumn() {
