@@ -322,6 +322,8 @@ const props = defineProps({
   columns: { type: Array, default: () => [] },
 });
 
+const analysis = computed(() => props.analysis);
+
 const viewportWidth = ref(typeof window === "undefined" ? 1440 : window.innerWidth);
 const selectedTimeColumn = ref("");
 const selectedGroupColumn = ref("");
@@ -488,7 +490,13 @@ const inferredNumericColumns = computed(() =>
 
 const inferredDateColumns = computed(() =>
   props.columns.filter((column) => {
-    const valid = props.rows.map((row) => toDate(row[column], column)).filter(Boolean);
+    const valid = props.rows
+      .map((row) => {
+        const numeric = toNumeric(row[column]);
+        if (numeric !== null && isPossibleExcelDate(numeric)) return excelSerialToDate(numeric);
+        return parseDateFromString(row[column]);
+      })
+      .filter(Boolean);
     return valid.length >= 3 && valid.length / Math.max(props.rows.length, 1) >= 0.4;
   }),
 );
@@ -894,6 +902,22 @@ const averagedScatterData = computed(() => {
     },
   ];
 });
+
+const averagedScatterLayout = computed(() => ({
+  margin: { l: 60, r: 20, t: 10, b: 60 },
+  height: Math.max(280, chartHeight.value - 40),
+  autosize: true,
+  paper_bgcolor: "rgba(0,0,0,0)",
+  plot_bgcolor: "rgba(0,0,0,0)",
+  xaxis: {
+    title: { text: selectedScatterX.value || "X" },
+    type: dateColumnSet.value.has(selectedScatterX.value) ? "date" : "linear",
+  },
+  yaxis: {
+    title: { text: selectedScatterY.value || "Y" },
+    type: dateColumnSet.value.has(selectedScatterY.value) ? "date" : "linear",
+  },
+}));
 
 const scatterData = computed(() => {
   if (!selectedScatterX.value || !selectedScatterY.value) return [];
