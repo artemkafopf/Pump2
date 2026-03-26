@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <section class="dashboard-grid">
     <section class="panel overview-panel">
       <div class="panel-header">
@@ -184,6 +184,22 @@
           </div>
         </div>
 
+        <div class="control-group">
+          <span class="control-title">Раскраска точек</span>
+          <div class="button-group">
+            <button
+              v-for="option in scatterColorOptions"
+              :key="`scatter-color-${option.value}`"
+              type="button"
+              class="choice-button"
+              :class="{ active: option.value === selectedScatterColorBy }"
+              @click="selectedScatterColorBy = option.value"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+        </div>
+
         <div v-if="scatterRangeReady" class="range-grid">
           <label class="field">
             <span>Минимум X: {{ formatAxisValue(selectedScatterX, scatterXMinValue) }}</span>
@@ -213,27 +229,33 @@
         <p>Окна по X с шагом 10%, среднее по Y без нулей и пустых значений.</p>
       </div>
 
-      <div v-if="averagedScatterTable.length" class="table-wrap compact-table">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Окно X</th>
-              <th>Средний X</th>
-              <th>Средний Y</th>
-              <th>Точек</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in averagedScatterTable" :key="row.windowLabel">
-              <td>{{ row.windowLabel }}</td>
-              <td>{{ row.avgX }}</td>
-              <td>{{ row.avgY }}</td>
-              <td>{{ row.count }}</td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="averaged-scatter-grid">
+        <div class="averaged-scatter-plot">
+          <PlotlyChart :data="averagedScatterData" :layout="averagedScatterLayout" />
+        </div>
+
+        <div v-if="averagedScatterTable.length" class="table-wrap compact-table">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Окно X</th>
+                <th>Средний X</th>
+                <th>Средний Y</th>
+                <th>Точек</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in averagedScatterTable" :key="row.windowLabel">
+                <td>{{ row.windowLabel }}</td>
+                <td>{{ row.avgX }}</td>
+                <td>{{ row.avgY }}</td>
+                <td>{{ row.count }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
-      <div v-else class="empty-state">
+      <div v-if="!averagedScatterTable.length" class="empty-state">
         Недостаточно данных для расчета осреднения в окнах по X.
       </div>
     </section>
@@ -308,6 +330,7 @@ const selectedScatterX = ref("");
 const selectedScatterY = ref("");
 const selectedHistogramColumn = ref("");
 const selectedHeatmapColorBy = ref("__count__");
+const selectedScatterColorBy = ref("__none__");
 const scatterXMinPercent = ref(0);
 const scatterXMaxPercent = ref(100);
 const scatterYMinPercent = ref(0);
@@ -332,19 +355,22 @@ const chartHeight = computed(() => {
 });
 
 const compactLeftMargin = computed(() => (viewportWidth.value < 720 ? 80 : 180));
-const datetimeColumnSet = computed(() => new Set(props.analysis.datetime_columns || []));
+
+function isPossibleExcelDate(value) {
+  return Number.isFinite(value) && value > 20000 && value < 80000;
+}
 
 function excelSerialToDate(value) {
   const epoch = new Date(Date.UTC(1899, 11, 30));
-  epoch.setUTCDate(epoch.getUTCDate() + Number(value));
+  const wholeDays = Math.trunc(Number(value));
+  const milliseconds = Math.round((Number(value) - wholeDays) * 24 * 60 * 60 * 1000);
+  epoch.setUTCDate(epoch.getUTCDate() + wholeDays);
+  epoch.setTime(epoch.getTime() + milliseconds);
   return epoch;
 }
 
 function parseDateFromString(value) {
   const trimmed = String(value).trim();
-  const iso = new Date(trimmed);
-  if (!Number.isNaN(iso.getTime())) return iso;
-
   const ruMatch = trimmed.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (ruMatch) {
     const day = Number(ruMatch[1]);
@@ -357,6 +383,21 @@ function parseDateFromString(value) {
     const parsed = new Date(Date.UTC(year, month, day, hour, minute, second));
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
+
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]) - 1;
+    const day = Number(isoMatch[3]);
+    const hour = Number(isoMatch[4] || 0);
+    const minute = Number(isoMatch[5] || 0);
+    const second = Number(isoMatch[6] || 0);
+    const parsed = new Date(Date.UTC(year, month, day, hour, minute, second));
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const iso = new Date(trimmed);
+  if (!Number.isNaN(iso.getTime())) return iso;
 
   return null;
 }
@@ -372,13 +413,21 @@ function toNumeric(value) {
 function toDate(value, column = "") {
   if (value === null || value === undefined || value === "") return null;
   const numeric = toNumeric(value);
-  if (numeric !== null && datetimeColumnSet.value.has(column)) return excelSerialToDate(numeric);
+  if (numeric !== null && (dateColumnSet.value.has(column) || isPossibleExcelDate(numeric))) return excelSerialToDate(numeric);
   return parseDateFromString(value);
 }
 
 function formatNumber(value) {
   if (value === null || value === undefined) return "n/a";
   return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(value);
+}
+
+function formatOneDecimal(value) {
+  if (value === null || value === undefined) return "n/a";
+  return new Intl.NumberFormat("ru-RU", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }).format(value);
 }
 
 function formatPercent(value) {
@@ -407,7 +456,7 @@ function normalizeCategory(value) {
 
 function formatAxisValue(column, value) {
   if (value === null || value === undefined) return "n/a";
-  if (datetimeColumnSet.value.has(column)) return formatDateLabel(new Date(value));
+  if (dateColumnSet.value.has(column)) return formatDateLabel(new Date(value));
   return formatNumber(value);
 }
 
@@ -416,14 +465,14 @@ function interpolateByPercent(min, max, percent) {
 }
 
 function formatWindowLabel(start, end, column) {
-  if (datetimeColumnSet.value.has(column)) {
+  if (dateColumnSet.value.has(column)) {
     return `${formatDateLabel(new Date(start))} - ${formatDateLabel(new Date(end))}`;
   }
   return `${formatNumber(start)} - ${formatNumber(end)}`;
 }
 
 function axisValueFromRow(row, column) {
-  if (datetimeColumnSet.value.has(column)) {
+  if (dateColumnSet.value.has(column)) {
     const date = toDate(row[column], column);
     return date ? date.getTime() : null;
   }
@@ -444,15 +493,17 @@ const inferredDateColumns = computed(() =>
   }),
 );
 
+const dateColumnSet = computed(() => new Set([...(props.analysis.datetime_columns || []), ...inferredDateColumns.value]));
+
 const availableTimeColumns = computed(() => {
-  const merged = new Set([...(props.analysis.datetime_columns || []), ...inferredDateColumns.value]);
+  const merged = new Set(dateColumnSet.value);
   return Array.from(merged);
 });
 
 const scatterColumns = computed(() => {
   const merged = new Set([
     ...(props.analysis.numeric_columns || []),
-    ...(props.analysis.datetime_columns || []),
+    ...dateColumnSet.value,
     ...inferredNumericColumns.value,
   ]);
   return Array.from(merged);
@@ -466,7 +517,7 @@ const heatmapColorOptions = computed(() => {
   const candidates = [
     props.analysis.dataset.target_column,
     ...(props.analysis.numeric_columns || []),
-    ...(props.analysis.datetime_columns || []),
+    ...dateColumnSet.value,
     ...inferredNumericColumns.value,
   ].filter(Boolean);
 
@@ -474,6 +525,18 @@ const heatmapColorOptions = computed(() => {
     if (!seen.has(candidate)) {
       options.push({ value: candidate, label: candidate });
       seen.add(candidate);
+    }
+  }
+  return options;
+});
+
+const scatterColorOptions = computed(() => {
+  const options = [{ value: "__none__", label: "Один цвет" }];
+  const seen = new Set(["__none__"]);
+  for (const column of props.columns) {
+    if (!seen.has(column) && column !== selectedScatterX.value && column !== selectedScatterY.value) {
+      options.push({ value: column, label: column });
+      seen.add(column);
     }
   }
   return options;
@@ -509,6 +572,16 @@ watch(
   (options) => {
     if (!options.some((option) => option.value === selectedHeatmapColorBy.value)) {
       selectedHeatmapColorBy.value = "__count__";
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  scatterColorOptions,
+  (options) => {
+    if (!options.some((option) => option.value === selectedScatterColorBy.value)) {
+      selectedScatterColorBy.value = "__none__";
     }
   },
   { immediate: true },
@@ -562,6 +635,12 @@ const correlationMatrixData = computed(() => [
     x: (props.analysis.correlations || []).map((item) => item.feature),
     y: [props.analysis.dataset.target_column || "Target"],
     z: [(props.analysis.correlations || []).map((item) => item.correlation)],
+    text: [(props.analysis.correlations || []).map((item) => item.correlation.toFixed(2))],
+    texttemplate: "%{text}",
+    textfont: {
+      color: "#0f172a",
+      size: viewportWidth.value < 720 ? 10 : 12,
+    },
     zmid: 0,
     colorscale: [
       [0, "#7f1d1d"],
@@ -603,6 +682,7 @@ const timeSeriesData = computed(() => {
   const byGroup = new Map();
   for (const item of aggregateMap.values()) {
     const line = byGroup.get(item.group) || [];
+    if (!item.values.length) continue;
     line.push({ x: item.date, y: item.values.reduce((sum, value) => sum + value, 0) / item.values.length });
     byGroup.set(item.group, line);
   }
@@ -613,7 +693,7 @@ const timeSeriesData = computed(() => {
       type: "scatter",
       mode: "lines+markers",
       name: group,
-      x: sortedPoints.map((point) => point.x.toISOString()),
+      x: sortedPoints.map((point) => point.x),
       y: sortedPoints.map((point) => point.y),
       hovertemplate: "%{x|%d.%m.%Y}<br>Среднее: %{y:.2f}<extra>" + group + "</extra>",
     };
@@ -643,8 +723,15 @@ const scatterBasePoints = computed(() => {
       const x = axisValueFromRow(row, selectedScatterX.value);
       const y = axisValueFromRow(row, selectedScatterY.value);
       if (x === null || y === null) return null;
-
-      const colorValue =
+      const scatterColorRaw =
+        selectedScatterColorBy.value && selectedScatterColorBy.value !== "__none__"
+          ? row[selectedScatterColorBy.value]
+          : null;
+      const scatterColorNumeric =
+        selectedScatterColorBy.value && selectedScatterColorBy.value !== "__none__"
+          ? axisValueFromRow(row, selectedScatterColorBy.value)
+          : null;
+      const heatmapColorValue =
         selectedHeatmapColorBy.value === "__count__"
           ? 1
           : axisValueFromRow(row, selectedHeatmapColorBy.value);
@@ -652,9 +739,15 @@ const scatterBasePoints = computed(() => {
       return {
         x,
         y,
-        xLabel: datetimeColumnSet.value.has(selectedScatterX.value) ? formatDateLabel(new Date(x)) : null,
-        yLabel: datetimeColumnSet.value.has(selectedScatterY.value) ? formatDateLabel(new Date(y)) : null,
-        colorValue,
+        xLabel: dateColumnSet.value.has(selectedScatterX.value) ? formatDateLabel(new Date(x)) : null,
+        yLabel: dateColumnSet.value.has(selectedScatterY.value) ? formatDateLabel(new Date(y)) : null,
+        scatterColorRaw,
+        scatterColorNumeric,
+        scatterColorLabel:
+          selectedScatterColorBy.value && selectedScatterColorBy.value !== "__none__"
+            ? normalizeCategory(row[selectedScatterColorBy.value])
+            : null,
+        heatmapColorValue,
       };
     })
     .filter(Boolean);
@@ -760,14 +853,72 @@ const averagedScatterBuckets = computed(() => {
 const averagedScatterTable = computed(() =>
   averagedScatterBuckets.value.map((bucket) => ({
     windowLabel: bucket.windowLabel,
-    avgX: bucket.avgXLabel,
-    avgY: bucket.avgYLabel,
+    avgX: dateColumnSet.value.has(selectedScatterX.value) ? bucket.avgXLabel : formatOneDecimal(bucket.avgX),
+    avgY: dateColumnSet.value.has(selectedScatterY.value) ? bucket.avgYLabel : formatOneDecimal(bucket.avgY),
     count: bucket.count,
   })),
 );
 
+const scatterColorMeta = computed(() => {
+  if (selectedScatterColorBy.value === "__none__") return { mode: "none" };
+
+  const numericValues = filteredScatterPoints.value
+    .map((point) => point.scatterColorNumeric)
+    .filter((value) => value !== null && value !== undefined);
+
+  if (numericValues.length >= Math.max(5, filteredScatterPoints.value.length * 0.4)) {
+    return { mode: "numeric" };
+  }
+
+  const palette = ["#ea580c", "#1d4ed8", "#0f766e", "#7c3aed", "#dc2626", "#0891b2", "#65a30d", "#d97706"];
+  const categories = Array.from(new Set(filteredScatterPoints.value.map((point) => point.scatterColorLabel)));
+  const colorMap = new Map(categories.map((category, index) => [category, palette[index % palette.length]]));
+  return { mode: "categorical", colorMap };
+});
+
+const averagedScatterData = computed(() => {
+  if (!averagedScatterBuckets.value.length) return [];
+
+  return [
+    {
+      type: "scatter",
+      mode: "lines+markers+text",
+      name: "Усредненные точки",
+      x: averagedScatterBuckets.value.map((bucket) => bucket.avgX),
+      y: averagedScatterBuckets.value.map((bucket) => bucket.avgY),
+      text: averagedScatterBuckets.value.map((bucket) => `X: ${bucket.avgXLabel}<br>Y: ${bucket.avgYLabel}`),
+      textposition: "top center",
+      line: { color: "#0f766e", width: 3 },
+      marker: { color: "#0f766e", size: 8 },
+      hovertemplate: "%{text}<extra></extra>",
+    },
+  ];
+});
+
 const scatterData = computed(() => {
   if (!selectedScatterX.value || !selectedScatterY.value) return [];
+
+  const marker = {
+    size: viewportWidth.value < 720 ? 7 : 8,
+    opacity: 0.72,
+  };
+
+  if (scatterColorMeta.value.mode === "numeric") {
+    marker.color = filteredScatterPoints.value.map((point) => point.scatterColorNumeric);
+    marker.colorscale = [
+      [0, "#eff6ff"],
+      [0.35, "#60a5fa"],
+      [0.7, "#2563eb"],
+      [1, "#1e3a8a"],
+    ];
+    marker.colorbar = { title: selectedScatterColorBy.value };
+  } else if (scatterColorMeta.value.mode === "categorical") {
+    marker.color = filteredScatterPoints.value.map(
+      (point) => scatterColorMeta.value.colorMap.get(point.scatterColorLabel) || "#ea580c",
+    );
+  } else {
+    marker.color = "#ea580c";
+  }
 
   const traces = [
     {
@@ -781,29 +932,20 @@ const scatterData = computed(() => {
           `${selectedScatterX.value}: ${point.xLabel || formatNumber(point.x)}`,
           `${selectedScatterY.value}: ${point.yLabel || formatNumber(point.y)}`,
         ];
+        if (selectedScatterColorBy.value !== "__none__") {
+          parts.push(`${selectedScatterColorBy.value}: ${point.scatterColorLabel}`);
+        }
         return parts.join("<br>");
       }),
       hovertemplate: "%{text}<extra></extra>",
-      marker: {
-        color: "#ea580c",
-        size: viewportWidth.value < 720 ? 7 : 8,
-        opacity: 0.72,
-      },
+      marker,
     },
   ];
 
-  if (averagedScatterBuckets.value.length) {
+  if (averagedScatterData.value.length) {
     traces.push({
-      type: "scatter",
-      mode: "lines+markers+text",
+      ...averagedScatterData.value[0],
       name: "Среднее Y по окнам X (10%)",
-      x: averagedScatterBuckets.value.map((bucket) => bucket.avgX),
-      y: averagedScatterBuckets.value.map((bucket) => bucket.avgY),
-      text: averagedScatterBuckets.value.map((bucket) => `X: ${bucket.avgXLabel}<br>Y: ${bucket.avgYLabel}`),
-      textposition: "top center",
-      line: { color: "#0f766e", width: 3 },
-      marker: { color: "#0f766e", size: 8 },
-      hovertemplate: "%{text}<extra></extra>",
     });
   }
 
@@ -818,12 +960,12 @@ const scatterLayout = computed(() => ({
   plot_bgcolor: "rgba(0,0,0,0)",
   xaxis: {
     title: { text: selectedScatterX.value || "Ось X" },
-    type: datetimeColumnSet.value.has(selectedScatterX.value) ? "date" : "linear",
+    type: dateColumnSet.value.has(selectedScatterX.value) ? "date" : "linear",
     range: scatterRangeReady.value ? [scatterXMinValue.value, scatterXMaxValue.value] : undefined,
   },
   yaxis: {
     title: { text: selectedScatterY.value || "Ось Y" },
-    type: datetimeColumnSet.value.has(selectedScatterY.value) ? "date" : "linear",
+    type: dateColumnSet.value.has(selectedScatterY.value) ? "date" : "linear",
     range: scatterRangeReady.value ? [scatterYMinValue.value, scatterYMaxValue.value] : undefined,
   },
   legend: { orientation: "h", y: 1.1 },
@@ -849,7 +991,9 @@ const scatterHeatmapData = computed(() => {
     ];
   }
 
-  const pointsWithColor = filteredScatterPoints.value.filter((point) => point.colorValue !== null && point.colorValue !== undefined);
+  const pointsWithColor = filteredScatterPoints.value.filter(
+    (point) => point.heatmapColorValue !== null && point.heatmapColorValue !== undefined,
+  );
   if (!pointsWithColor.length) return [];
 
   return [
@@ -857,7 +1001,7 @@ const scatterHeatmapData = computed(() => {
       type: "histogram2d",
       x: pointsWithColor.map((point) => point.x),
       y: pointsWithColor.map((point) => point.y),
-      z: pointsWithColor.map((point) => point.colorValue),
+      z: pointsWithColor.map((point) => point.heatmapColorValue),
       histfunc: "avg",
       colorscale: [
         [0, "#fff7ed"],
@@ -878,18 +1022,18 @@ const scatterHeatmapLayout = computed(() => ({
   plot_bgcolor: "rgba(0,0,0,0)",
   xaxis: {
     title: { text: selectedScatterX.value || "Ось X" },
-    type: datetimeColumnSet.value.has(selectedScatterX.value) ? "date" : "linear",
+    type: dateColumnSet.value.has(selectedScatterX.value) ? "date" : "linear",
   },
   yaxis: {
     title: { text: selectedScatterY.value || "Ось Y" },
-    type: datetimeColumnSet.value.has(selectedScatterY.value) ? "date" : "linear",
+    type: dateColumnSet.value.has(selectedScatterY.value) ? "date" : "linear",
   },
 }));
 
 const histogramData = computed(() => {
   if (!selectedHistogramColumn.value) return [];
 
-  if (datetimeColumnSet.value.has(selectedHistogramColumn.value)) {
+  if (dateColumnSet.value.has(selectedHistogramColumn.value)) {
     const counts = new Map();
     for (const row of props.rows) {
       const date = toDate(row[selectedHistogramColumn.value], selectedHistogramColumn.value);
@@ -988,3 +1132,7 @@ const pivotTable = computed(() => {
   };
 });
 </script>
+
+
+
+

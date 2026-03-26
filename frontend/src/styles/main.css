@@ -327,6 +327,17 @@ input {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.averaged-scatter-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.averaged-scatter-plot {
+  min-width: 0;
+}
+
 .plotly-chart {
   min-height: 320px;
   width: 100%;
@@ -454,6 +465,10 @@ input {
   }
 
   .overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .averaged-scatter-grid {
     grid-template-columns: 1fr;
   }
 

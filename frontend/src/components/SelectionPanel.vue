@@ -44,7 +44,7 @@
     </div>
 
     <button type="button" class="primary-button" :disabled="saving || !localTargetColumn" @click="saveSelection">
-      {{ saving ? "Сохранение..." : "Сохранить выбор переменных" }}
+      {{ saving ? "Сохранение..." : "Запустить аналитику CatBoost" }}
     </button>
   </section>
 </template>
