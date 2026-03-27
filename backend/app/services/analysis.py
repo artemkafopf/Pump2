@@ -379,7 +379,7 @@ def build_correlations_with_selection(
         target_column,
         selected_columns,
     )
-    correlations: list[CorrelationItem] = []
+    correlation_map: dict[str, float | None] = {column: None for column in feature_df.columns}
 
     for column in numeric_columns:
         series = coerce_numeric_series(feature_df[column])
@@ -387,7 +387,7 @@ def build_correlations_with_selection(
             continue
         corr = series.corr(clean["_target_numeric"])
         if pd.notna(corr):
-            correlations.append(CorrelationItem(feature=column, correlation=float(corr)))
+            correlation_map[column] = float(corr)
 
     for column in datetime_columns:
         series = pd.to_datetime(feature_df[column], errors="coerce")
@@ -397,10 +397,14 @@ def build_correlations_with_selection(
             continue
         corr = numeric_time.corr(clean["_target_numeric"])
         if pd.notna(corr):
-            correlations.append(CorrelationItem(feature=column, correlation=float(corr)))
+            correlation_map[column] = float(corr)
 
-    correlations.sort(key=lambda item: abs(item.correlation), reverse=True)
-    return correlations[:25], numeric_columns, categorical_columns, datetime_columns
+    ordered_correlations = [
+        CorrelationItem(feature=column, correlation=correlation_map.get(column))
+        for column in selected_columns
+        if column in feature_df.columns
+    ]
+    return ordered_correlations, numeric_columns, categorical_columns, datetime_columns
 
 
 def build_feature_importance_with_selection(
@@ -455,5 +459,9 @@ def build_feature_importance_with_selection(
         FeatureImportanceItem(feature=feature, importance=float(importance))
         for feature, importance in zip(prepared.columns.tolist(), model.get_feature_importance(), strict=False)
     ]
-    items.sort(key=lambda item: item.importance, reverse=True)
-    return items[:25]
+    importance_map = {item.feature: item.importance for item in items}
+    return [
+        FeatureImportanceItem(feature=column, importance=float(importance_map.get(column, 0.0)))
+        for column in selected_columns
+        if column in prepared.columns
+    ]

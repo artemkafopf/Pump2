@@ -44,7 +44,7 @@ class Overview(BaseModel):
 
 class CorrelationItem(BaseModel):
     feature: str
-    correlation: float
+    correlation: float | None
 
 
 class FeatureImportanceItem(BaseModel):

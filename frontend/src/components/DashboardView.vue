@@ -789,8 +789,16 @@ const correlationMatrixData = computed(() => [
     type: "heatmap",
     x: (props.analysis.correlations || []).map((item) => item.feature),
     y: [props.analysis.dataset.target_column || "Target"],
-    z: [(props.analysis.correlations || []).map((item) => item.correlation)],
-    text: [(props.analysis.correlations || []).map((item) => item.correlation.toFixed(2))],
+    z: [
+      (props.analysis.correlations || []).map((item) =>
+        item.correlation === null || item.correlation === undefined ? null : item.correlation,
+      ),
+    ],
+    text: [
+      (props.analysis.correlations || []).map((item) =>
+        item.correlation === null || item.correlation === undefined ? "n/a" : item.correlation.toFixed(2),
+      ),
+    ],
     texttemplate: "%{text}",
     textfont: {
       color: "#0f172a",
@@ -802,7 +810,7 @@ const correlationMatrixData = computed(() => [
       [0.5, "#f8fafc"],
       [1, "#0f766e"],
     ],
-    hovertemplate: "Признак: %{x}<br>Корреляция: %{z:.3f}<extra></extra>",
+    hovertemplate: "Признак: %{x}<br>Корреляция: %{text}<extra></extra>",
   },
 ]);
 
