@@ -29,6 +29,11 @@ class Dataset(Base):
         cascade="all, delete-orphan",
         order_by="Record.row_index",
     )
+    trained_models: Mapped[list["TrainedModel"]] = relationship(
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+        order_by="TrainedModel.created_at.desc()",
+    )
 
 
 class Record(Base):
@@ -40,3 +45,24 @@ class Record(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
 
     dataset: Mapped[Dataset] = relationship(back_populates="records")
+
+
+class TrainedModel(Base):
+    __tablename__ = "trained_models"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_id: Mapped[int] = mapped_column(ForeignKey("datasets.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    feature_columns_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    numeric_feature_columns_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    metrics_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    model_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    dataset: Mapped[Dataset] = relationship(back_populates="trained_models")

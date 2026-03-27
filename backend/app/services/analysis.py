@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import timezone
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from catboost import CatBoostRegressor, Pool
 
-from app.db.models import Dataset, Record
+from app.db.models import Dataset, Record, TrainedModel
 from app.schemas.analysis import (
     AnalysisResponse,
     CorrelationItem,
@@ -16,6 +18,8 @@ from app.schemas.analysis import (
     ForecastMetrics,
     ForecastModelResponse,
     ForecastPredictResponse,
+    SaveForecastModelRequest,
+    SavedModelSummary,
     FeatureImportanceItem,
     Overview,
     UploadResponse,
@@ -25,6 +29,7 @@ from app.schemas.analysis import (
 NUMERIC_PARSE_THRESHOLD = 0.8
 DATETIME_PARSE_THRESHOLD = 0.8
 MIN_NON_NULL_FOR_ANALYSIS = 5
+MODEL_STORE_DIR = Path(__file__).resolve().parents[1] / "model_store"
 DATETIME_NAME_TOKENS = (
     "date",
     "datetime",
@@ -99,6 +104,11 @@ def dataset_to_summary(dataset: Dataset) -> DatasetSummary:
 
 def build_upload_response(dataset: Dataset) -> UploadResponse:
     return UploadResponse(dataset=dataset_to_summary(dataset))
+
+
+def ensure_model_store() -> Path:
+    MODEL_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    return MODEL_STORE_DIR
 
 
 def records_to_rows(records: list[Record]) -> list[dict]:
@@ -551,6 +561,37 @@ def build_forecast_metrics(actual: pd.Series, predicted: np.ndarray) -> Forecast
     )
 
 
+def forecast_metrics_to_dict(metrics: ForecastMetrics) -> dict:
+    return {
+        "train_rows": metrics.train_rows,
+        "test_rows": metrics.test_rows,
+        "rmse": metrics.rmse,
+        "mae": metrics.mae,
+        "r2": metrics.r2,
+    }
+
+
+def saved_model_to_summary(model: TrainedModel) -> SavedModelSummary:
+    metrics_json = model.metrics_json or {}
+    return SavedModelSummary(
+        id=model.id,
+        dataset_id=model.dataset_id,
+        name=model.name,
+        target_column=model.target_column,
+        feature_columns=list(model.feature_columns_json or []),
+        numeric_feature_columns=list(model.numeric_feature_columns_json or []),
+        metrics=ForecastMetrics(
+            train_rows=int(metrics_json.get("train_rows", 0)),
+            test_rows=int(metrics_json.get("test_rows", 0)),
+            rmse=metrics_json.get("rmse"),
+            mae=metrics_json.get("mae"),
+            r2=metrics_json.get("r2"),
+        ),
+        is_active=bool(model.is_active),
+        created_at=model.created_at,
+    )
+
+
 def train_forecast_model(
     dataset: Dataset,
     records: list[Record],
@@ -612,6 +653,71 @@ def train_forecast_model(
         "numeric_feature_columns": numeric_feature_columns,
         "baseline_values": baseline_values,
         "metrics": metrics,
+    }
+
+
+def save_trained_forecast_model(
+    dataset: Dataset,
+    trained: dict,
+    model_name: str | None = None,
+) -> TrainedModel:
+    ensure_model_store()
+    timestamp = pd.Timestamp.now(tz=timezone.utc).strftime("%Y%m%d%H%M%S")
+    file_name = f"dataset_{dataset.id}_{timestamp}.cbm"
+    model_path = ensure_model_store() / file_name
+    trained["model"].save_model(str(model_path))
+
+    return TrainedModel(
+        dataset_id=dataset.id,
+        name=(model_name or f"Model {timestamp}").strip(),
+        target_column=dataset.target_column,
+        feature_columns_json=list(trained["feature_columns"]),
+        numeric_feature_columns_json=list(trained["numeric_feature_columns"]),
+        metrics_json=forecast_metrics_to_dict(trained["metrics"]),
+        model_path=str(model_path),
+        is_active=1,
+    )
+
+
+def load_saved_forecast_model(model: TrainedModel, dataset: Dataset, records: list[Record]) -> dict | None:
+    model_file = Path(model.model_path)
+    if not model_file.exists():
+        return None
+
+    df = records_to_dataframe(records, list(dataset.columns_json))
+    feature_columns = [column for column in list(model.feature_columns_json or []) if column in df.columns]
+    prepared, _, target_series = prepare_forecast_frame(df, dataset.target_column, feature_columns)
+    if prepared.empty:
+        prepared = pd.DataFrame(columns=feature_columns)
+
+    loaded_model = CatBoostRegressor()
+    loaded_model.load_model(str(model_file))
+
+    baseline_values: dict[str, str | float] = {}
+    numeric_feature_columns = list(model.numeric_feature_columns_json or [])
+    numeric_feature_set = set(numeric_feature_columns)
+    for column in feature_columns:
+        if column in prepared.columns and column in numeric_feature_set:
+            baseline_values[column] = float(pd.to_numeric(prepared[column], errors="coerce").median()) if not prepared.empty else 0.0
+        elif column in prepared.columns and not prepared.empty:
+            mode = prepared[column].mode(dropna=True)
+            baseline_values[column] = str(mode.iloc[0]) if not mode.empty else "__missing__"
+        else:
+            baseline_values[column] = 0.0 if column in numeric_feature_set else "__missing__"
+
+    return {
+        "model": loaded_model,
+        "prepared": prepared,
+        "feature_columns": feature_columns,
+        "numeric_feature_columns": numeric_feature_columns,
+        "baseline_values": baseline_values,
+        "metrics": ForecastMetrics(
+            train_rows=int((model.metrics_json or {}).get("train_rows", 0)),
+            test_rows=int((model.metrics_json or {}).get("test_rows", 0)),
+            rmse=(model.metrics_json or {}).get("rmse"),
+            mae=(model.metrics_json or {}).get("mae"),
+            r2=(model.metrics_json or {}).get("r2"),
+        ),
     }
 
 
@@ -724,11 +830,16 @@ def build_forecast_model_response(
     )
 
 
+def list_saved_models(dataset: Dataset) -> list[SavedModelSummary]:
+    return [saved_model_to_summary(model) for model in getattr(dataset, "trained_models", [])]
+
+
 def build_forecast_predict_response(
     dataset: Dataset,
     records: list[Record],
     requested_columns: list[str],
     rows: list[dict],
+    model: TrainedModel | None = None,
     x_feature: str | None = None,
     y_feature: str | None = None,
     slice_overrides: dict[str, str | float | int | None] | None = None,
@@ -736,7 +847,10 @@ def build_forecast_predict_response(
     test_fraction: float = 0.2,
     random_seed: int = 42,
 ) -> ForecastPredictResponse:
-    trained = train_forecast_model(dataset, records, requested_columns, test_fraction=test_fraction, random_seed=random_seed)
+    trained = (
+        load_saved_forecast_model(model, dataset, records) if model is not None else
+        train_forecast_model(dataset, records, requested_columns, test_fraction=test_fraction, random_seed=random_seed)
+    )
     if trained is None:
         return ForecastPredictResponse(
             dataset=dataset_to_summary(dataset),

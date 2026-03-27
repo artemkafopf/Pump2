@@ -13,6 +13,8 @@ from app.schemas.analysis import (
     ForecastPredictRequest,
     ForecastPredictResponse,
     ForecastTrainRequest,
+    SaveForecastModelRequest,
+    SavedModelSummary,
     UploadResponse,
 )
 from app.services.analysis import (
@@ -22,8 +24,12 @@ from app.services.analysis import (
     build_forecast_predict_response,
     build_upload_response,
     dataset_to_summary,
+    list_saved_models,
     read_excel_to_dataframe,
     resolve_target_column,
+    save_trained_forecast_model,
+    saved_model_to_summary,
+    train_forecast_model,
     to_json_safe,
 )
 
@@ -157,18 +163,63 @@ def train_dataset_forecast(dataset_id: int, payload: ForecastTrainRequest, db: S
     )
 
 
-@router.post("/datasets/{dataset_id}/forecast/predict", response_model=ForecastPredictResponse)
-def predict_dataset_forecast(dataset_id: int, payload: ForecastPredictRequest, db: Session = Depends(get_db)):
+@router.get("/datasets/{dataset_id}/forecast/models", response_model=list[SavedModelSummary])
+def get_saved_forecast_models(dataset_id: int, db: Session = Depends(get_db)):
     dataset = db.scalar(
-        select(Dataset).options(selectinload(Dataset.records)).where(Dataset.id == dataset_id)
+        select(Dataset).options(selectinload(Dataset.trained_models)).where(Dataset.id == dataset_id)
     )
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found.")
+    return list_saved_models(dataset)
+
+
+@router.post("/datasets/{dataset_id}/forecast/models", response_model=SavedModelSummary)
+def save_dataset_forecast_model(dataset_id: int, payload: SaveForecastModelRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset).options(selectinload(Dataset.records), selectinload(Dataset.trained_models)).where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    trained = train_forecast_model(
+        dataset,
+        dataset.records,
+        payload.feature_columns,
+        test_fraction=payload.test_fraction,
+        random_seed=payload.random_seed,
+    )
+    if trained is None:
+        raise HTTPException(status_code=400, detail="Model could not be trained on the selected columns.")
+
+    for model in dataset.trained_models:
+        model.is_active = 0
+        db.add(model)
+
+    saved_model = save_trained_forecast_model(dataset, trained, model_name=payload.name)
+    db.add(saved_model)
+    db.commit()
+    db.refresh(saved_model)
+    return saved_model_to_summary(saved_model)
+
+
+@router.post("/datasets/{dataset_id}/forecast/predict", response_model=ForecastPredictResponse)
+def predict_dataset_forecast(dataset_id: int, payload: ForecastPredictRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset).options(selectinload(Dataset.records), selectinload(Dataset.trained_models)).where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    selected_model = None
+    if payload.model_id is not None:
+        selected_model = next((model for model in dataset.trained_models if model.id == payload.model_id), None)
+        if selected_model is None:
+            raise HTTPException(status_code=404, detail="Saved model not found.")
     return build_forecast_predict_response(
         dataset,
         dataset.records,
         payload.feature_columns,
         payload.rows,
+        model=selected_model,
         x_feature=payload.x_feature,
         y_feature=payload.y_feature,
         slice_overrides=payload.slice_overrides,

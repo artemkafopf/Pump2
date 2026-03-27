@@ -87,7 +87,27 @@ class ForecastModelResponse(BaseModel):
     numeric_feature_columns: list[str]
 
 
+class SavedModelSummary(BaseModel):
+    id: int
+    dataset_id: int
+    name: str
+    target_column: str | None
+    feature_columns: list[str]
+    numeric_feature_columns: list[str]
+    metrics: ForecastMetrics
+    is_active: bool
+    created_at: datetime
+
+
+class SaveForecastModelRequest(BaseModel):
+    name: str | None = None
+    feature_columns: list[str]
+    test_fraction: float = 0.2
+    random_seed: int = 42
+
+
 class ForecastPredictRequest(BaseModel):
+    model_id: int | None = None
     feature_columns: list[str]
     rows: list[dict]
     x_feature: str | None = None

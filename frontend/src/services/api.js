@@ -67,6 +67,22 @@ export async function trainForecastModel(datasetId, payload) {
   return parseResponse(response);
 }
 
+export async function listSavedForecastModels(datasetId) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/forecast/models`);
+  return parseResponse(response);
+}
+
+export async function saveForecastModel(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/forecast/models`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
 export async function predictForecast(datasetId, payload) {
   const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/forecast/predict`, {
     method: "POST",

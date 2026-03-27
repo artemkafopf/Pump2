@@ -59,11 +59,31 @@
           <button type="button" class="primary-button" :disabled="training || !enabledFeatureColumns.length" @click="handleTrain">
             {{ training ? "Обучение..." : "Обучить модель прогноза" }}
           </button>
+          <button type="button" class="file-button" :disabled="savingModel || !modelInfo" @click="handleSaveModel">
+            {{ savingModel ? "Сохранение..." : "Сохранить модель" }}
+          </button>
           <button type="button" class="file-button" :disabled="predicting || !enabledFeatureColumns.length" @click="handlePredict">
             {{ predicting ? "Прогноз..." : "Обновить прогноз" }}
           </button>
         </div>
       </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Сохранённые модели</h2>
+        <p>Выберите сохранённую модель CatBoost, которую нужно использовать для прогноза.</p>
+      </div>
+
+      <label class="field">
+        <span>Модель для прогноза</span>
+        <select v-model="selectedSavedModelId">
+          <option :value="null">Текущая обученная модель</option>
+          <option v-for="model in savedModels" :key="model.id" :value="model.id">
+            {{ model.name }} · {{ formatMetric(model.metrics.rmse) }} RMSE
+          </option>
+        </select>
+      </label>
     </section>
 
     <section v-if="modelInfo" class="panel">
@@ -257,7 +277,7 @@
 <script setup>
 import { computed, ref, watch } from "vue";
 import PlotlyChart from "./PlotlyChart.vue";
-import { predictForecast, trainForecastModel } from "../services/api";
+import { listSavedForecastModels, predictForecast, saveForecastModel, trainForecastModel } from "../services/api";
 
 const props = defineProps({
   dataset: { type: Object, required: true },
@@ -270,6 +290,9 @@ const predicting = ref(false);
 const testFractionPercent = ref(20);
 const randomSeed = ref(42);
 const modelInfo = ref(null);
+const savedModels = ref([]);
+const selectedSavedModelId = ref(null);
+const savingModel = ref(false);
 const predictionResponse = ref(null);
 const datasetPredictionResponse = ref(null);
 const enabledFeatureColumns = ref([]);
@@ -486,6 +509,24 @@ watch(
   { immediate: true },
 );
 
+async function loadSavedModels() {
+  savedModels.value = await listSavedForecastModels(props.dataset.id);
+  const activeModel = savedModels.value.find((model) => model.is_active);
+  if (activeModel) {
+    selectedSavedModelId.value = activeModel.id;
+  } else if (!savedModels.value.some((model) => model.id === selectedSavedModelId.value)) {
+    selectedSavedModelId.value = null;
+  }
+}
+
+watch(
+  () => props.dataset.id,
+  async () => {
+    await loadSavedModels();
+  },
+  { immediate: true },
+);
+
 function formatMetric(value) {
   if (value === null || value === undefined) return "n/a";
   return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 3 }).format(value);
@@ -591,11 +632,29 @@ async function handleTrain() {
   }
 }
 
+async function handleSaveModel() {
+  if (!modelInfo.value || !modelFeatureColumns.value.length) return;
+  savingModel.value = true;
+  try {
+    const model = await saveForecastModel(props.dataset.id, {
+      name: `${props.dataset.name} v${props.dataset.storage_version}`,
+      feature_columns: modelFeatureColumns.value,
+      test_fraction: testFraction.value,
+      random_seed: randomSeed.value,
+    });
+    await loadSavedModels();
+    selectedSavedModelId.value = model.id;
+  } finally {
+    savingModel.value = false;
+  }
+}
+
 async function handlePredict() {
-  if (!modelFeatureColumns.value.length) return;
+  if (!modelFeatureColumns.value.length && !selectedSavedModelId.value) return;
   predicting.value = true;
   try {
     const response = await predictForecast(props.dataset.id, {
+      model_id: selectedSavedModelId.value || null,
       feature_columns: modelFeatureColumns.value,
       rows: props.rows,
       x_feature: contourXFeature.value || null,
@@ -621,8 +680,9 @@ async function handlePredict() {
 }
 
 async function refreshContour() {
-  if (!modelInfo.value || !modelFeatureColumns.value.length) return;
+  if (!modelInfo.value && !selectedSavedModelId.value) return;
   const response = await predictForecast(props.dataset.id, {
+    model_id: selectedSavedModelId.value || null,
     feature_columns: modelFeatureColumns.value,
     rows: props.rows,
     x_feature: contourXFeature.value || null,
