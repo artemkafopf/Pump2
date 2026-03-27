@@ -230,6 +230,22 @@
             </button>
           </div>
         </div>
+
+        <div class="control-group">
+          <span class="control-title">Палитра номограммы</span>
+          <div class="button-group">
+            <button
+              v-for="option in contourPaletteOptions"
+              :key="`contour-palette-${option.value}`"
+              type="button"
+              class="choice-button"
+              :class="{ active: selectedContourPalette === option.value }"
+              @click="selectedContourPalette = option.value"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+        </div>
       </div>
 
       <PlotlyChart :data="contourData" :layout="contourLayout" />
@@ -262,6 +278,7 @@ const contourXFeature = ref("");
 const contourYFeature = ref("");
 const selectedContourSliceColumn = ref("");
 const selectedContourSliceValue = ref("");
+const selectedContourPalette = ref("softBlue");
 const selectedTimeColumn = ref("");
 const selectedGroupColumn = ref("");
 const selectedGroupValues = ref([]);
@@ -333,6 +350,44 @@ const modelFeatureColumns = computed(() => {
   });
   return next;
 });
+
+const contourPaletteOptions = [
+  { value: "softBlue", label: "Светло-голубая" },
+  { value: "contrast", label: "Контрастная" },
+  { value: "warm", label: "Тёплая" },
+  { value: "green", label: "Бирюзовая" },
+];
+
+const contourColorScales = {
+  softBlue: [
+    [0, "#dbeafe"],
+    [0.25, "#bfdbfe"],
+    [0.5, "#93c5fd"],
+    [0.75, "#60a5fa"],
+    [1, "#1d4ed8"],
+  ],
+  contrast: [
+    [0, "#e0f2fe"],
+    [0.2, "#7dd3fc"],
+    [0.45, "#38bdf8"],
+    [0.7, "#0ea5e9"],
+    [1, "#1e3a8a"],
+  ],
+  warm: [
+    [0, "#fff7ed"],
+    [0.25, "#fed7aa"],
+    [0.5, "#fdba74"],
+    [0.75, "#fb923c"],
+    [1, "#c2410c"],
+  ],
+  green: [
+    [0, "#ecfeff"],
+    [0.25, "#a5f3fc"],
+    [0.5, "#67e8f9"],
+    [0.75, "#2dd4bf"],
+    [1, "#0f766e"],
+  ],
+};
 
 const timeGroupValues = computed(() => {
   if (!selectedGroupColumn.value) return [];
@@ -596,13 +651,14 @@ watch(
 
 const contourData = computed(() => {
   if (!predictionResponse.value?.contour) return [];
+  const colorscale = contourColorScales[selectedContourPalette.value] || contourColorScales.softBlue;
   return [
     {
       type: "contour",
       x: predictionResponse.value.contour.x_values,
       y: predictionResponse.value.contour.y_values,
       z: predictionResponse.value.contour.z_values,
-      colorscale: "Viridis",
+      colorscale,
       contours: {
         coloring: "heatmap",
         showlabels: true,

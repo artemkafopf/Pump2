@@ -19,9 +19,10 @@ export async function listDatasets() {
   return parseResponse(response);
 }
 
-export async function uploadDataset({ datasetName, file }) {
+export async function uploadDataset({ datasetName, file, storageSection }) {
   const formData = new FormData();
   formData.append("dataset_name", datasetName);
+  formData.append("storage_section", storageSection || "fact_epu");
   formData.append("file", file);
 
   const response = await fetch(`${API_BASE_URL}/datasets/upload`, {

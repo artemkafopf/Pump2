@@ -29,6 +29,15 @@
             <button
               type="button"
               class="dataset-item module-item"
+              :class="{ active: activeModule === 'storage' }"
+              @click="activeModule = 'storage'"
+            >
+              <span class="dataset-name">Хранение данных</span>
+              <span class="dataset-meta">Разделы хранения и версии наборов данных</span>
+            </button>
+            <button
+              type="button"
+              class="dataset-item module-item"
               :class="{ active: activeModule === 'analysis' }"
               @click="activeModule = 'analysis'"
             >
@@ -46,8 +55,6 @@
             </button>
           </div>
         </section>
-        <UploadPanel :loading="uploading" @upload="handleUpload" />
-        <DatasetList :datasets="datasets" :selected-dataset-id="selectedDatasetId" @select="loadDataset" />
       </aside>
 
       <section class="content">
@@ -61,6 +68,8 @@
               <p>{{ selectedDataset.dataset.original_filename }}</p>
             </div>
             <div class="table-meta">
+              <span>Раздел: {{ selectedDataset.dataset.storage_section }}</span>
+              <span>Версия: {{ selectedDataset.dataset.storage_version }}</span>
               <span>Целевая переменная: {{ selectedDataset.dataset.target_column || "Не указана" }}</span>
               <span>Зависимых переменных: {{ selectedDataset.dataset.selected_features.length }}</span>
               <span>Строк: {{ selectedDataset.dataset.row_count }}</span>
@@ -68,7 +77,18 @@
             </div>
           </section>
 
-          <template v-if="activeModule === 'analysis'">
+          <template v-if="activeModule === 'storage'">
+            <UploadPanel :loading="uploading" @upload="handleUpload" />
+            <StoragePanel
+              :datasets="datasets"
+              :active-section="storageSection"
+              :selected-dataset-id="selectedDatasetId"
+              @section-change="handleStorageSectionChange"
+              @select="loadDataset"
+            />
+          </template>
+
+          <template v-else-if="activeModule === 'analysis'">
             <SelectionPanel
               :columns="selectedDataset.dataset.columns"
               :target-column="selectedDataset.dataset.target_column || ''"
@@ -106,10 +126,10 @@
 <script setup>
 import { onMounted, ref } from "vue";
 import DashboardView from "./components/DashboardView.vue";
-import DatasetList from "./components/DatasetList.vue";
 import PredictionModule from "./components/PredictionModule.vue";
 import RawTable from "./components/RawTable.vue";
 import SelectionPanel from "./components/SelectionPanel.vue";
+import StoragePanel from "./components/StoragePanel.vue";
 import UploadPanel from "./components/UploadPanel.vue";
 import {
   fetchAnalysis,
@@ -127,6 +147,7 @@ const uploading = ref(false);
 const loadingData = ref(false);
 const savingSelection = ref(false);
 const errorMessage = ref("");
+const storageSection = ref("fact_epu");
 const activeModule = ref("analysis");
 const sidebarCollapsed = ref(false);
 
@@ -145,6 +166,7 @@ async function loadDataset(datasetId) {
     const [dataset, analysis] = await Promise.all([fetchDataset(datasetId), fetchAnalysis(datasetId)]);
     selectedDataset.value = dataset;
     selectedAnalysis.value = analysis;
+    storageSection.value = dataset.dataset.storage_section || "fact_epu";
   } catch (error) {
     errorMessage.value = error.message;
   } finally {
@@ -186,6 +208,16 @@ async function handleSelectionSave(payload) {
     errorMessage.value = error.message;
   } finally {
     savingSelection.value = false;
+  }
+}
+
+async function handleStorageSectionChange(section) {
+  storageSection.value = section;
+  const nextDataset = datasets.value
+    .filter((dataset) => dataset.storage_section === section)
+    .sort((a, b) => b.storage_version - a.storage_version)[0];
+  if (nextDataset) {
+    await loadDataset(nextDataset.id);
   }
 }
 

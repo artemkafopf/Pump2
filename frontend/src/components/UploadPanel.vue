@@ -2,13 +2,22 @@
   <section class="panel upload-panel">
     <div class="panel-header">
       <h2>Загрузка Excel</h2>
-      <p>После загрузки сервис распознает заголовки и предложит выбрать target и зависимые переменные кнопками.</p>
+      <p>После загрузки сервис распознает заголовки, сохранит таблицу и поместит набор в выбранный раздел хранения.</p>
     </div>
 
     <form class="upload-form" @submit.prevent="handleSubmit">
       <label class="field">
         <span>Название набора</span>
         <input v-model.trim="datasetName" type="text" placeholder="Например, Скважины март" required />
+      </label>
+
+      <label class="field">
+        <span>Раздел хранения</span>
+        <select v-model="storageSection">
+          <option v-for="section in STORAGE_SECTIONS" :key="section.value" :value="section.value">
+            {{ section.label }}
+          </option>
+        </select>
       </label>
 
       <label class="file-picker">
@@ -27,6 +36,16 @@
 <script setup>
 import { computed, ref } from "vue";
 
+const STORAGE_SECTIONS = [
+  { value: "fact_epu", label: "Факт ЭПУ" },
+  { value: "plan_epu", label: "План ЭПУ" },
+  { value: "production", label: "Добыча" },
+  { value: "plan_gtm", label: "План ГТМ" },
+  { value: "fact_krs", label: "Факт КРС" },
+  { value: "plan_krs", label: "План КРС" },
+  { value: "gtm_rating", label: "Рейтинг ГТМ" },
+];
+
 const emit = defineEmits(["upload"]);
 
 defineProps({
@@ -38,6 +57,7 @@ defineProps({
 
 const file = ref(null);
 const datasetName = ref("");
+const storageSection = ref("fact_epu");
 
 const selectedFileName = computed(() => file.value?.name || "Файл не выбран");
 
@@ -53,6 +73,7 @@ function handleSubmit() {
 
   emit("upload", {
     datasetName: datasetName.value,
+    storageSection: storageSection.value,
     file: file.value,
   });
 }

@@ -12,6 +12,8 @@ class Dataset(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_section: Mapped[str] = mapped_column(String(64), nullable=False, default="fact_epu")
+    storage_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     target_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
     row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     columns_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)

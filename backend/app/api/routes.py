@@ -39,6 +39,7 @@ def list_datasets(db: Session = Depends(get_db)):
 @router.post("/datasets/upload", response_model=UploadResponse)
 async def upload_dataset(
     dataset_name: str = Form(...),
+    storage_section: str = Form("fact_epu"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -58,9 +59,19 @@ async def upload_dataset(
 
     original_columns = [str(column) for column in df.columns.tolist()]
     df.columns = original_columns
+    normalized_section = (storage_section or "fact_epu").strip() or "fact_epu"
+    latest_version = db.scalar(
+        select(Dataset.storage_version)
+        .where(Dataset.storage_section == normalized_section)
+        .order_by(Dataset.storage_version.desc())
+        .limit(1)
+    )
+
     dataset = Dataset(
         name=dataset_name.strip(),
         original_filename=filename,
+        storage_section=normalized_section,
+        storage_version=int(latest_version or 0) + 1,
         target_column=None,
         selected_features_json=[],
         row_count=int(len(df)),

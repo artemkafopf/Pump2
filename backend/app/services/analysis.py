@@ -87,6 +87,8 @@ def dataset_to_summary(dataset: Dataset) -> DatasetSummary:
         id=dataset.id,
         name=dataset.name,
         original_filename=dataset.original_filename,
+        storage_section=dataset.storage_section,
+        storage_version=dataset.storage_version,
         target_column=dataset.target_column,
         selected_features=list(dataset.selected_features_json),
         row_count=dataset.row_count,

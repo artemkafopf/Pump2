@@ -7,6 +7,8 @@ class DatasetSummary(BaseModel):
     id: int
     name: str
     original_filename: str
+    storage_section: str
+    storage_version: int
     target_column: str | None
     selected_features: list[str]
     row_count: int
