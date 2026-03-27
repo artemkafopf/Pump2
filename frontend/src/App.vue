@@ -17,7 +17,35 @@
     </header>
 
     <main class="layout">
-      <aside class="sidebar">
+      <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
+        <section class="panel module-sidebar">
+          <div class="module-sidebar-header">
+            <h2>Модули</h2>
+            <button type="button" class="choice-button sidebar-toggle" @click="sidebarCollapsed = !sidebarCollapsed">
+              {{ sidebarCollapsed ? "Развернуть" : "Свернуть" }}
+            </button>
+          </div>
+          <div class="module-nav">
+            <button
+              type="button"
+              class="dataset-item module-item"
+              :class="{ active: activeModule === 'analysis' }"
+              @click="activeModule = 'analysis'"
+            >
+              <span class="dataset-name">Анализ работы насосов</span>
+              <span class="dataset-meta">Текущий модуль анализа и визуализации</span>
+            </button>
+            <button
+              type="button"
+              class="dataset-item module-item"
+              :class="{ active: activeModule === 'forecast' }"
+              @click="activeModule = 'forecast'"
+            >
+              <span class="dataset-name">Прогноз отказов</span>
+              <span class="dataset-meta">Настройка CatBoost и прогноз по ручным сценариям</span>
+            </button>
+          </div>
+        </section>
         <UploadPanel :loading="uploading" @upload="handleUpload" />
         <DatasetList :datasets="datasets" :selected-dataset-id="selectedDatasetId" @select="loadDataset" />
       </aside>
@@ -40,21 +68,30 @@
             </div>
           </section>
 
-          <SelectionPanel
-            :columns="selectedDataset.dataset.columns"
-            :target-column="selectedDataset.dataset.target_column || ''"
-            :selected-features="selectedDataset.dataset.selected_features"
-            :saving="savingSelection"
-            @save="handleSelectionSave"
-          />
+          <template v-if="activeModule === 'analysis'">
+            <SelectionPanel
+              :columns="selectedDataset.dataset.columns"
+              :target-column="selectedDataset.dataset.target_column || ''"
+              :selected-features="selectedDataset.dataset.selected_features"
+              :saving="savingSelection"
+              @save="handleSelectionSave"
+            />
 
-          <DashboardView
+            <DashboardView
+              :analysis="selectedAnalysis"
+              :rows="selectedDataset.rows"
+              :columns="selectedDataset.dataset.columns"
+            />
+
+            <RawTable :columns="selectedDataset.dataset.columns" :rows="selectedDataset.rows" />
+          </template>
+
+          <PredictionModule
+            v-else
+            :dataset="selectedDataset.dataset"
             :analysis="selectedAnalysis"
             :rows="selectedDataset.rows"
-            :columns="selectedDataset.dataset.columns"
           />
-
-          <RawTable :columns="selectedDataset.dataset.columns" :rows="selectedDataset.rows" />
         </template>
 
         <section v-else class="panel empty-big">
@@ -70,6 +107,7 @@
 import { onMounted, ref } from "vue";
 import DashboardView from "./components/DashboardView.vue";
 import DatasetList from "./components/DatasetList.vue";
+import PredictionModule from "./components/PredictionModule.vue";
 import RawTable from "./components/RawTable.vue";
 import SelectionPanel from "./components/SelectionPanel.vue";
 import UploadPanel from "./components/UploadPanel.vue";
@@ -89,6 +127,8 @@ const uploading = ref(false);
 const loadingData = ref(false);
 const savingSelection = ref(false);
 const errorMessage = ref("");
+const activeModule = ref("analysis");
+const sidebarCollapsed = ref(false);
 
 async function refreshDatasets() {
   datasets.value = await listDatasets();

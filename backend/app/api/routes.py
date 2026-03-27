@@ -9,11 +9,17 @@ from app.schemas.analysis import (
     ColumnSelectionUpdate,
     DatasetDetail,
     DatasetSummary,
+    ForecastModelResponse,
+    ForecastPredictRequest,
+    ForecastPredictResponse,
+    ForecastTrainRequest,
     UploadResponse,
 )
 from app.services.analysis import (
     build_analysis_response,
     build_dataset_detail,
+    build_forecast_model_response,
+    build_forecast_predict_response,
     build_upload_response,
     dataset_to_summary,
     read_excel_to_dataframe,
@@ -122,3 +128,40 @@ def get_dataset_analysis(dataset_id: int, db: Session = Depends(get_db)):
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found.")
     return build_analysis_response(dataset, dataset.records)
+
+
+@router.post("/datasets/{dataset_id}/forecast/train", response_model=ForecastModelResponse)
+def train_dataset_forecast(dataset_id: int, payload: ForecastTrainRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset).options(selectinload(Dataset.records)).where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    return build_forecast_model_response(
+        dataset,
+        dataset.records,
+        payload.feature_columns,
+        test_fraction=payload.test_fraction,
+        random_seed=payload.random_seed,
+    )
+
+
+@router.post("/datasets/{dataset_id}/forecast/predict", response_model=ForecastPredictResponse)
+def predict_dataset_forecast(dataset_id: int, payload: ForecastPredictRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset).options(selectinload(Dataset.records)).where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    return build_forecast_predict_response(
+        dataset,
+        dataset.records,
+        payload.feature_columns,
+        payload.rows,
+        x_feature=payload.x_feature,
+        y_feature=payload.y_feature,
+        slice_overrides=payload.slice_overrides,
+        contour_resolution=payload.contour_resolution,
+        test_fraction=payload.test_fraction,
+        random_seed=payload.random_seed,
+    )

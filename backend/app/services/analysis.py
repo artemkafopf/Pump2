@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import numpy as np
 import pandas as pd
 from catboost import CatBoostRegressor, Pool
 
@@ -11,6 +12,10 @@ from app.schemas.analysis import (
     CorrelationItem,
     DatasetDetail,
     DatasetSummary,
+    ForecastContourResponse,
+    ForecastMetrics,
+    ForecastModelResponse,
+    ForecastPredictResponse,
     FeatureImportanceItem,
     Overview,
     UploadResponse,
@@ -465,3 +470,292 @@ def build_feature_importance_with_selection(
         for column in selected_columns
         if column in prepared.columns
     ]
+
+
+def resolve_forecast_columns(dataset: Dataset, requested_columns: list[str], df: pd.DataFrame) -> list[str]:
+    available_columns = [column for column in list(dataset.columns_json) if column in df.columns and column != dataset.target_column]
+    resolved: list[str] = []
+    for column in requested_columns:
+        resolved_column = resolve_target_column(column, available_columns)
+        if resolved_column and resolved_column not in resolved:
+            resolved.append(resolved_column)
+    if resolved:
+        return resolved
+
+    selected_columns = get_analysis_columns(dataset, df)
+    return [column for column in selected_columns if column in available_columns]
+
+
+def prepare_forecast_frame(
+    df: pd.DataFrame,
+    target_column: str | None,
+    feature_columns: list[str],
+) -> tuple[pd.DataFrame, list[str], pd.Series]:
+    target = build_target_series(df, target_column)
+    if target.empty:
+        return pd.DataFrame(), [], pd.Series(dtype=float)
+
+    clean = df.copy()
+    clean["_target_numeric"] = target
+    clean = clean[clean["_target_numeric"].notna()].copy()
+    if clean.empty or clean["_target_numeric"].nunique() < 2:
+        return pd.DataFrame(), [], pd.Series(dtype=float)
+
+    feature_df, numeric_columns, categorical_columns, datetime_columns = classify_columns(
+        clean,
+        target_column,
+        feature_columns,
+    )
+    prepared = pd.DataFrame(index=feature_df.index)
+    numeric_feature_columns: list[str] = []
+
+    for column in numeric_columns:
+        prepared[column] = coerce_numeric_series(feature_df[column])
+        numeric_feature_columns.append(column)
+
+    for column in datetime_columns:
+        dt_series = pd.to_datetime(feature_df[column], errors="coerce")
+        prepared[column] = dt_series.map(lambda value: value.timestamp() if pd.notna(value) else None)
+        numeric_feature_columns.append(column)
+
+    for column in categorical_columns:
+        prepared[column] = feature_df[column].astype("string").fillna("__missing__")
+
+    prepared = prepared.dropna(axis=0, how="all")
+    if prepared.empty:
+        return pd.DataFrame(), numeric_feature_columns, pd.Series(dtype=float)
+
+    target_series = clean.loc[prepared.index, "_target_numeric"]
+    return prepared, numeric_feature_columns, target_series
+
+
+def build_forecast_metrics(actual: pd.Series, predicted: np.ndarray) -> ForecastMetrics:
+    residual = actual.to_numpy(dtype=float) - predicted
+    rmse = float(np.sqrt(np.mean(np.square(residual)))) if len(actual) else None
+    mae = float(np.mean(np.abs(residual))) if len(actual) else None
+    if len(actual) and actual.nunique() > 1:
+        ss_res = float(np.sum(np.square(residual)))
+        ss_tot = float(np.sum(np.square(actual.to_numpy(dtype=float) - actual.mean())))
+        r2 = float(1 - (ss_res / ss_tot)) if ss_tot else None
+    else:
+        r2 = None
+
+    return ForecastMetrics(
+        train_rows=0,
+        test_rows=int(len(actual)),
+        rmse=rmse,
+        mae=mae,
+        r2=r2,
+    )
+
+
+def train_forecast_model(
+    dataset: Dataset,
+    records: list[Record],
+    requested_columns: list[str],
+    test_fraction: float = 0.2,
+    random_seed: int = 42,
+):
+    df = records_to_dataframe(records, list(dataset.columns_json))
+    feature_columns = resolve_forecast_columns(dataset, requested_columns, df)
+    prepared, numeric_feature_columns, target_series = prepare_forecast_frame(df, dataset.target_column, feature_columns)
+    if prepared.empty or target_series.empty:
+        return None
+
+    test_fraction = min(max(test_fraction, 0.05), 0.4)
+    total_rows = len(prepared)
+    test_rows = max(1, int(total_rows * test_fraction)) if total_rows > 4 else max(1, total_rows // 3)
+    test_rows = min(test_rows, max(total_rows - 1, 1))
+    shuffled_indices = prepared.sample(frac=1.0, random_state=random_seed).index.tolist()
+    test_index = shuffled_indices[:test_rows]
+    train_index = shuffled_indices[test_rows:] or shuffled_indices[: max(total_rows - test_rows, 1)]
+
+    train_frame = prepared.loc[train_index]
+    train_target = target_series.loc[train_index]
+    test_frame = prepared.loc[test_index]
+    test_target = target_series.loc[test_index]
+
+    categorical_columns = [column for column in prepared.columns if column not in numeric_feature_columns]
+    categorical_feature_indices = [prepared.columns.get_loc(column) for column in categorical_columns]
+
+    model = CatBoostRegressor(
+        iterations=500,
+        depth=6,
+        learning_rate=0.05,
+        loss_function="RMSE",
+        eval_metric="RMSE",
+        random_seed=random_seed,
+        verbose=False,
+        allow_writing_files=False,
+    )
+    model.fit(Pool(train_frame, train_target, cat_features=categorical_feature_indices))
+
+    test_predictions = model.predict(test_frame)
+    metrics = build_forecast_metrics(test_target, test_predictions)
+    metrics.train_rows = int(len(train_frame))
+    metrics.test_rows = int(len(test_frame))
+
+    baseline_values: dict[str, str | float] = {}
+    for column in prepared.columns:
+        if column in numeric_feature_columns:
+            baseline_values[column] = float(pd.to_numeric(prepared[column], errors="coerce").median())
+        else:
+            mode = prepared[column].mode(dropna=True)
+            baseline_values[column] = str(mode.iloc[0]) if not mode.empty else "__missing__"
+
+    return {
+        "model": model,
+        "prepared": prepared,
+        "feature_columns": prepared.columns.tolist(),
+        "numeric_feature_columns": numeric_feature_columns,
+        "baseline_values": baseline_values,
+        "metrics": metrics,
+    }
+
+
+def predict_forecast_rows(
+    trained: dict,
+    rows: list[dict],
+) -> list[float | None]:
+    feature_columns = trained["feature_columns"]
+    numeric_feature_columns = set(trained["numeric_feature_columns"])
+    baseline_values = trained["baseline_values"]
+    prediction_frame = pd.DataFrame(index=range(len(rows)))
+
+    for column in feature_columns:
+        source_values = [row.get(column, baseline_values.get(column)) for row in rows]
+        series = pd.Series(source_values, dtype="object")
+        if column in numeric_feature_columns:
+            prediction_frame[column] = coerce_numeric_series(series)
+        else:
+            prediction_frame[column] = series.astype("string").fillna("__missing__")
+
+    result: list[float | None] = [None] * len(rows)
+    valid_mask = prediction_frame.notna().any(axis=1)
+    if valid_mask.any():
+        predicted = trained["model"].predict(prediction_frame.loc[valid_mask])
+        for index, value in zip(prediction_frame.loc[valid_mask].index.tolist(), predicted, strict=False):
+            result[index] = float(value)
+    return result
+
+
+def build_forecast_contour(
+    trained: dict,
+    x_feature: str | None,
+    y_feature: str | None,
+    slice_overrides: dict[str, str | float | int | None] | None = None,
+    contour_resolution: int = 24,
+) -> ForecastContourResponse | None:
+    if not x_feature or not y_feature:
+        return None
+    if x_feature == y_feature:
+        return None
+
+    prepared = trained["prepared"]
+    numeric_feature_columns = set(trained["numeric_feature_columns"])
+    if x_feature not in numeric_feature_columns or y_feature not in numeric_feature_columns:
+        return None
+
+    x_series = pd.to_numeric(prepared[x_feature], errors="coerce").dropna()
+    y_series = pd.to_numeric(prepared[y_feature], errors="coerce").dropna()
+    if x_series.empty or y_series.empty:
+        return None
+
+    contour_resolution = int(min(max(contour_resolution, 8), 40))
+    x_values = np.linspace(float(x_series.min()), float(x_series.max()), contour_resolution)
+    y_values = np.linspace(float(y_series.min()), float(y_series.max()), contour_resolution)
+    baseline_values = trained["baseline_values"]
+    feature_columns = trained["feature_columns"]
+
+    grid_rows: list[dict] = []
+    for y_value in y_values:
+        for x_value in x_values:
+            row = {column: baseline_values.get(column) for column in feature_columns}
+            if slice_overrides:
+                for column, value in slice_overrides.items():
+                    if column in row:
+                        row[column] = value
+            row[x_feature] = float(x_value)
+            row[y_feature] = float(y_value)
+            grid_rows.append(row)
+
+    predictions = predict_forecast_rows(trained, grid_rows)
+    z_values: list[list[float | None]] = []
+    offset = 0
+    for _ in y_values:
+        row_values = predictions[offset : offset + len(x_values)]
+        z_values.append(row_values)
+        offset += len(x_values)
+
+    return ForecastContourResponse(
+        x_feature=x_feature,
+        y_feature=y_feature,
+        x_values=[float(value) for value in x_values],
+        y_values=[float(value) for value in y_values],
+        z_values=z_values,
+    )
+
+
+def build_forecast_model_response(
+    dataset: Dataset,
+    records: list[Record],
+    requested_columns: list[str],
+    test_fraction: float = 0.2,
+    random_seed: int = 42,
+) -> ForecastModelResponse:
+    trained = train_forecast_model(dataset, records, requested_columns, test_fraction=test_fraction, random_seed=random_seed)
+    if trained is None:
+        return ForecastModelResponse(
+            dataset=dataset_to_summary(dataset),
+            target_column=dataset.target_column,
+            feature_columns=[],
+            metrics=ForecastMetrics(train_rows=0, test_rows=0, rmse=None, mae=None, r2=None),
+            numeric_feature_columns=[],
+        )
+
+    return ForecastModelResponse(
+        dataset=dataset_to_summary(dataset),
+        target_column=dataset.target_column,
+        feature_columns=trained["feature_columns"],
+        metrics=trained["metrics"],
+        numeric_feature_columns=list(trained["numeric_feature_columns"]),
+    )
+
+
+def build_forecast_predict_response(
+    dataset: Dataset,
+    records: list[Record],
+    requested_columns: list[str],
+    rows: list[dict],
+    x_feature: str | None = None,
+    y_feature: str | None = None,
+    slice_overrides: dict[str, str | float | int | None] | None = None,
+    contour_resolution: int = 24,
+    test_fraction: float = 0.2,
+    random_seed: int = 42,
+) -> ForecastPredictResponse:
+    trained = train_forecast_model(dataset, records, requested_columns, test_fraction=test_fraction, random_seed=random_seed)
+    if trained is None:
+        return ForecastPredictResponse(
+            dataset=dataset_to_summary(dataset),
+            target_column=dataset.target_column,
+            feature_columns=[],
+            metrics=ForecastMetrics(train_rows=0, test_rows=0, rmse=None, mae=None, r2=None),
+            predictions=[None for _ in rows],
+            contour=None,
+        )
+
+    return ForecastPredictResponse(
+        dataset=dataset_to_summary(dataset),
+        target_column=dataset.target_column,
+        feature_columns=trained["feature_columns"],
+        metrics=trained["metrics"],
+        predictions=predict_forecast_rows(trained, rows),
+        contour=build_forecast_contour(
+            trained,
+            x_feature,
+            y_feature,
+            slice_overrides=slice_overrides,
+            contour_resolution=contour_resolution,
+        ),
+    )

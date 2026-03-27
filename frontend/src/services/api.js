@@ -54,3 +54,25 @@ export async function updateDatasetSelection(datasetId, payload) {
   });
   return parseResponse(response);
 }
+
+export async function trainForecastModel(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/forecast/train`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
+export async function predictForecast(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/forecast/predict`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
