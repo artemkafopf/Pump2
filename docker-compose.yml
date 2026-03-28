@@ -29,9 +29,13 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       CORS_ORIGINS: ${CORS_ORIGINS}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
     depends_on:
       db:
         condition: service_healthy
+      ollama:
+        condition: service_started
     ports:
       - "${BACKEND_PORT:-8000}:8000"
 
@@ -47,6 +51,30 @@ services:
     ports:
       - "${FRONTEND_PORT:-5173}:80"
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: excel-analysis-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: excel-analysis-ollama-init
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sleep 8
+        ollama pull ${LLM_MODEL:-llama3.1:8b}
+    restart: "no"
+
 volumes:
   postgres_data:
-
+  ollama_data:

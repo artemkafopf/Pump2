@@ -5,7 +5,9 @@ from sqlalchemy import inspect, text
 from app.api.routes import router
 from app.core.config import settings
 from app.db.database import Base, engine
-from app.db.models import TrainedModel
+from app.db.database import SessionLocal
+from app.db.models import CanonicalVariable, DatasetColumnMatch, GeneratedReport, TrainedModel, VariableAlias
+from app.services.variable_mapping import seed_default_dictionary
 
 
 Base.metadata.create_all(bind=engine)
@@ -50,6 +52,17 @@ def ensure_dataset_storage_fields() -> None:
 
 
 ensure_dataset_storage_fields()
+
+
+def initialize_semantic_dictionary() -> None:
+    session = SessionLocal()
+    try:
+        seed_default_dictionary(session)
+    finally:
+        session.close()
+
+
+initialize_semantic_dictionary()
 
 app = FastAPI(
     title="Excel Relationship Analysis API",

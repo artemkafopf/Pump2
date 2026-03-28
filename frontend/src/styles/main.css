@@ -549,6 +549,28 @@ a {
   min-width: 0;
 }
 
+.report-list {
+  display: grid;
+  gap: 16px;
+}
+
+.report-card {
+  padding: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.report-content {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 0.94rem;
+  line-height: 1.6;
+}
+
 .plotly-chart {
   width: 100%;
   min-height: 320px;

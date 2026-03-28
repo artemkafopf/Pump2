@@ -93,3 +93,45 @@ export async function predictForecast(datasetId, payload) {
   });
   return parseResponse(response);
 }
+
+export async function fetchLLMStatus() {
+  const response = await fetch(`${API_BASE_URL}/llm/status`);
+  return parseResponse(response);
+}
+
+export async function fetchVariableDictionary() {
+  const response = await fetch(`${API_BASE_URL}/variables/dictionary`);
+  return parseResponse(response);
+}
+
+export async function fetchVariableMatches(datasetId) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/variables/matches`);
+  return parseResponse(response);
+}
+
+export async function reconcileVariables(datasetId, payload = {}) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/variables/reconcile`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
+export async function fetchReports(datasetId) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/reports`);
+  return parseResponse(response);
+}
+
+export async function generateReport(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/reports/generate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}

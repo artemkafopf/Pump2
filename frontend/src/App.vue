@@ -1,7 +1,7 @@
 <template>
   <div class="app-shell">
-    <div class="logo-banner" aria-label="wild ПМК">
-      <img :src="logoAsset" alt="wild ПМК" class="logo-image" />
+    <div class="logo-banner" aria-label="WOWPUMP">
+      <img :src="logoAsset" alt="WOWPUMP" class="logo-image" />
     </div>
 
     <main class="layout">
@@ -33,6 +33,16 @@
             >
               <span class="dataset-name">Анализ работы насосов</span>
               <span class="dataset-meta">Анализ зависимостей, CatBoost и визуализация</span>
+            </button>
+
+            <button
+              type="button"
+              class="dataset-item module-item"
+              :class="{ active: activeModule === 'semantic' }"
+              @click="activeModule = 'semantic'"
+            >
+              <span class="dataset-name">Словарь и отчеты</span>
+              <span class="dataset-meta">LLaMA, согласование заголовков и генерация отчетов</span>
             </button>
 
             <button
@@ -100,6 +110,11 @@
             <RawTable :columns="selectedDataset.dataset.columns" :rows="selectedDataset.rows" />
           </template>
 
+          <AIWorkbench
+            v-else-if="activeModule === 'semantic'"
+            :dataset="selectedDataset.dataset"
+          />
+
           <PredictionModule
             v-else
             :dataset="selectedDataset.dataset"
@@ -110,7 +125,7 @@
 
         <section v-else class="panel empty-big">
           <h2>Проект готов к работе</h2>
-          <p>Загрузите первый Excel-файл, чтобы увидеть таблицу, аналитику и прогнозные сценарии.</p>
+          <p>Загрузите первый Excel-файл, чтобы увидеть таблицу, аналитику, словарь переменных и прогнозные сценарии.</p>
         </section>
       </section>
     </main>
@@ -120,6 +135,7 @@
 <script setup>
 import { onMounted, ref } from "vue";
 import logoAsset from "./assets/wowpumpLOGO.png";
+import AIWorkbench from "./components/AIWorkbench.vue";
 import DashboardView from "./components/DashboardView.vue";
 import PredictionModule from "./components/PredictionModule.vue";
 import RawTable from "./components/RawTable.vue";

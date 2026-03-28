@@ -133,3 +133,59 @@ class ForecastPredictResponse(BaseModel):
     metrics: ForecastMetrics
     predictions: list[float | None]
     contour: ForecastContourResponse | None
+
+
+class LLMStatusResponse(BaseModel):
+    available: bool
+    model: str
+    installed: bool
+    models: list[str]
+    error: str | None = None
+
+
+class CanonicalVariableSummary(BaseModel):
+    id: int
+    canonical_name: str
+    description: str | None = None
+    aliases: list[str]
+
+
+class DatasetColumnMatchSummary(BaseModel):
+    id: int | None = None
+    source_column: str
+    canonical_name: str
+    canonical_variable_id: int | None = None
+    confidence: float
+    reasoning: str | None = None
+    status: str
+    llm_used: bool
+
+
+class VariableReconcileRequest(BaseModel):
+    persist: bool = True
+    use_llm: bool = True
+
+
+class VariableReconcileResponse(BaseModel):
+    dataset: DatasetSummary
+    matches: list[DatasetColumnMatchSummary]
+    unresolved_columns: list[str]
+    llm_used: bool
+    notes: list[str]
+
+
+class ReportGenerateRequest(BaseModel):
+    report_type: str = "analysis_forecast"
+    model_id: int | None = None
+    use_llm: bool = True
+
+
+class GeneratedReportSummary(BaseModel):
+    id: int
+    dataset_id: int
+    trained_model_id: int | None = None
+    report_type: str
+    title: str
+    content: str
+    llm_used: bool
+    created_at: datetime

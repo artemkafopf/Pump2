@@ -3,18 +3,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
-from app.db.models import Dataset, Record
+from app.db.models import Dataset, Record, TrainedModel
 from app.schemas.analysis import (
     AnalysisResponse,
+    CanonicalVariableSummary,
     ColumnSelectionUpdate,
     DatasetDetail,
+    DatasetColumnMatchSummary,
     DatasetSummary,
     ForecastModelResponse,
     ForecastPredictRequest,
     ForecastPredictResponse,
     ForecastTrainRequest,
+    GeneratedReportSummary,
+    LLMStatusResponse,
+    ReportGenerateRequest,
     SaveForecastModelRequest,
     SavedModelSummary,
+    VariableReconcileRequest,
+    VariableReconcileResponse,
     UploadResponse,
 )
 from app.services.analysis import (
@@ -32,8 +39,25 @@ from app.services.analysis import (
     train_forecast_model,
     to_json_safe,
 )
+from app.services.llm_client import llm_client
+from app.services.reporting import generate_report, list_reports
+from app.services.variable_mapping import (
+    dictionary_snapshot,
+    get_dataset_matches,
+    reconcile_dataset_columns,
+)
 
 router = APIRouter()
+
+
+@router.get("/llm/status", response_model=LLMStatusResponse)
+def get_llm_status():
+    return LLMStatusResponse(**llm_client.status())
+
+
+@router.get("/variables/dictionary", response_model=list[CanonicalVariableSummary])
+def get_variable_dictionary(db: Session = Depends(get_db)):
+    return [CanonicalVariableSummary(**item) for item in dictionary_snapshot(db)]
 
 
 @router.get("/datasets", response_model=list[DatasetSummary])
@@ -147,6 +171,54 @@ def get_dataset_analysis(dataset_id: int, db: Session = Depends(get_db)):
     return build_analysis_response(dataset, dataset.records)
 
 
+@router.get("/datasets/{dataset_id}/variables/matches", response_model=list[DatasetColumnMatchSummary])
+def get_dataset_variable_matches(dataset_id: int, db: Session = Depends(get_db)):
+    dataset = db.scalar(select(Dataset).where(Dataset.id == dataset_id))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    return [
+        DatasetColumnMatchSummary(
+            id=item.id,
+            source_column=item.source_column,
+            canonical_name=item.canonical_name,
+            canonical_variable_id=item.canonical_variable_id,
+            confidence=float(item.confidence),
+            reasoning=item.reasoning,
+            status=item.status,
+            llm_used=bool(item.llm_used),
+        )
+        for item in get_dataset_matches(db, dataset_id)
+    ]
+
+
+@router.post("/datasets/{dataset_id}/variables/reconcile", response_model=VariableReconcileResponse)
+def reconcile_variables(dataset_id: int, payload: VariableReconcileRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(select(Dataset).where(Dataset.id == dataset_id))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    result = reconcile_dataset_columns(db, dataset, persist=payload.persist, use_llm=payload.use_llm)
+    return VariableReconcileResponse(
+        dataset=dataset_to_summary(dataset),
+        matches=[
+            DatasetColumnMatchSummary(
+                id=item.id,
+                source_column=item.source_column,
+                canonical_name=item.canonical_name,
+                canonical_variable_id=item.canonical_variable_id,
+                confidence=float(item.confidence),
+                reasoning=item.reasoning,
+                status=item.status,
+                llm_used=bool(item.llm_used),
+            )
+            for item in result["matches"]
+        ],
+        unresolved_columns=result["unresolved_columns"],
+        llm_used=bool(result["llm_used"]),
+        notes=result["notes"],
+    )
+
+
 @router.post("/datasets/{dataset_id}/forecast/train", response_model=ForecastModelResponse)
 def train_dataset_forecast(dataset_id: int, payload: ForecastTrainRequest, db: Session = Depends(get_db)):
     dataset = db.scalar(
@@ -226,4 +298,58 @@ def predict_dataset_forecast(dataset_id: int, payload: ForecastPredictRequest, d
         contour_resolution=payload.contour_resolution,
         test_fraction=payload.test_fraction,
         random_seed=payload.random_seed,
+    )
+
+
+@router.get("/datasets/{dataset_id}/reports", response_model=list[GeneratedReportSummary])
+def get_dataset_reports(dataset_id: int, db: Session = Depends(get_db)):
+    dataset = db.scalar(select(Dataset).where(Dataset.id == dataset_id))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    return [
+        GeneratedReportSummary(
+            id=report.id,
+            dataset_id=report.dataset_id,
+            trained_model_id=report.trained_model_id,
+            report_type=report.report_type,
+            title=report.title,
+            content=report.content,
+            llm_used=bool(report.llm_used),
+            created_at=report.created_at,
+        )
+        for report in list_reports(db, dataset_id)
+    ]
+
+
+@router.post("/datasets/{dataset_id}/reports/generate", response_model=GeneratedReportSummary)
+def generate_dataset_report(dataset_id: int, payload: ReportGenerateRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset).options(selectinload(Dataset.records)).where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    model = None
+    if payload.model_id is not None:
+        model = db.scalar(select(TrainedModel).where(TrainedModel.id == payload.model_id))
+        if model is None or model.dataset_id != dataset_id:
+            raise HTTPException(status_code=404, detail="Saved model not found.")
+
+    report = generate_report(
+        db,
+        dataset,
+        dataset.records,
+        report_type=payload.report_type,
+        model=model,
+        use_llm=payload.use_llm,
+    )
+    return GeneratedReportSummary(
+        id=report.id,
+        dataset_id=report.dataset_id,
+        trained_model_id=report.trained_model_id,
+        report_type=report.report_type,
+        title=report.title,
+        content=report.content,
+        llm_used=bool(report.llm_used),
+        created_at=report.created_at,
     )
