@@ -1,20 +1,8 @@
 <template>
   <div class="app-shell">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">Excel + CatBoost + PostgreSQL</p>
-        <h1>Анализ связей с целевой переменной</h1>
-        <p class="hero-copy">
-          Загружайте Excel без изменения исходной таблицы, храните ее в Postgres и исследуйте связи
-          через CatBoost, корреляции и интерактивные графики.
-        </p>
-      </div>
-      <div class="hero-badge">
-        <span>Backend: FastAPI</span>
-        <span>Frontend: Vue 3</span>
-        <span>DB: Postgres</span>
-      </div>
-    </header>
+    <div class="logo-banner" aria-label="wild ПМК">
+      <img :src="logoAsset" alt="wild ПМК" class="logo-image" />
+    </div>
 
     <main class="layout">
       <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
@@ -25,6 +13,7 @@
               {{ sidebarCollapsed ? "Развернуть" : "Свернуть" }}
             </button>
           </div>
+
           <div class="module-nav">
             <button
               type="button"
@@ -35,6 +24,7 @@
               <span class="dataset-name">Хранение данных</span>
               <span class="dataset-meta">Разделы хранения и версии наборов данных</span>
             </button>
+
             <button
               type="button"
               class="dataset-item module-item"
@@ -42,8 +32,9 @@
               @click="activeModule = 'analysis'"
             >
               <span class="dataset-name">Анализ работы насосов</span>
-              <span class="dataset-meta">Текущий модуль анализа и визуализации</span>
+              <span class="dataset-meta">Анализ зависимостей, CatBoost и визуализация</span>
             </button>
+
             <button
               type="button"
               class="dataset-item module-item"
@@ -51,7 +42,7 @@
               @click="activeModule = 'forecast'"
             >
               <span class="dataset-name">Прогноз отказов</span>
-              <span class="dataset-meta">Настройка CatBoost и прогноз по ручным сценариям</span>
+              <span class="dataset-meta">Обучение, сохранение моделей и прогнозные сценарии</span>
             </button>
           </div>
         </section>
@@ -64,9 +55,12 @@
         <template v-else-if="selectedDataset && selectedAnalysis">
           <section class="panel dataset-headline">
             <div class="panel-header">
-              <h2>{{ selectedDataset.dataset.name }}</h2>
-              <p>{{ selectedDataset.dataset.original_filename }}</p>
+              <div>
+                <h2>{{ selectedDataset.dataset.name }}</h2>
+                <p>{{ selectedDataset.dataset.original_filename }}</p>
+              </div>
             </div>
+
             <div class="table-meta">
               <span>Раздел: {{ selectedDataset.dataset.storage_section }}</span>
               <span>Версия: {{ selectedDataset.dataset.storage_version }}</span>
@@ -116,7 +110,7 @@
 
         <section v-else class="panel empty-big">
           <h2>Проект готов к работе</h2>
-          <p>Загрузите первый Excel-файл, чтобы увидеть таблицу, связи с target и интерактивные графики.</p>
+          <p>Загрузите первый Excel-файл, чтобы увидеть таблицу, аналитику и прогнозные сценарии.</p>
         </section>
       </section>
     </main>
@@ -125,6 +119,7 @@
 
 <script setup>
 import { onMounted, ref } from "vue";
+import logoAsset from "./assets/wowpumpLOGO.png";
 import DashboardView from "./components/DashboardView.vue";
 import PredictionModule from "./components/PredictionModule.vue";
 import RawTable from "./components/RawTable.vue";

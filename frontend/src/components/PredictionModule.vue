@@ -724,12 +724,19 @@ const contourData = computed(() => {
         showlabels: true,
         labelfont: {
           size: 11,
-          color: "#0f172a",
+          color: "#e5e7eb",
         },
       },
-      line: { width: 1.2, color: "rgba(15, 23, 42, 0.45)" },
+      line: { width: 1.1, color: "rgba(229, 231, 235, 0.22)" },
       colorbar: {
         title: targetColumn.value || "Target",
+        tickcolor: "rgba(255,255,255,0.12)",
+        tickfont: {
+          color: "#cbd5e1",
+        },
+        titlefont: {
+          color: "#e5e7eb",
+        },
       },
       hovertemplate: `${contourXFeature.value || "X"}: %{x}<br>${contourYFeature.value || "Y"}: %{y}<br>${targetColumn.value || "Target"}: %{z:.2f}<extra></extra>`,
     },
