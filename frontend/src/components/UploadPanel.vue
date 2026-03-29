@@ -2,7 +2,10 @@
   <section class="panel upload-panel">
     <div class="panel-header">
       <h2>Загрузка Excel</h2>
-      <p>После загрузки сервис распознает заголовки, сохранит таблицу и поместит набор в выбранный раздел хранения.</p>
+      <p>
+        После загрузки сервис сохранит таблицу и откроет окно выбора способа сопоставления заголовков:
+        через LLaMA или вручную.
+      </p>
     </div>
 
     <form class="upload-form" @submit.prevent="handleSubmit">
@@ -27,7 +30,7 @@
       </label>
 
       <button class="primary-button" type="submit" :disabled="loading">
-        {{ loading ? "Загрузка..." : "Загрузить и проанализировать" }}
+        {{ loading ? "Загрузка..." : "Загрузить и открыть сопоставление" }}
       </button>
     </form>
   </section>

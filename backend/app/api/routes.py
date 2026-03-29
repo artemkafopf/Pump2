@@ -17,6 +17,7 @@ from app.schemas.analysis import (
     ForecastTrainRequest,
     GeneratedReportSummary,
     LLMStatusResponse,
+    ManualVariableMatchRequest,
     ReportGenerateRequest,
     SaveForecastModelRequest,
     SavedModelSummary,
@@ -45,6 +46,7 @@ from app.services.variable_mapping import (
     dictionary_snapshot,
     get_dataset_matches,
     reconcile_dataset_columns,
+    save_manual_dataset_matches,
 )
 
 router = APIRouter()
@@ -197,7 +199,13 @@ def reconcile_variables(dataset_id: int, payload: VariableReconcileRequest, db: 
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found.")
 
-    result = reconcile_dataset_columns(db, dataset, persist=payload.persist, use_llm=payload.use_llm)
+    result = reconcile_dataset_columns(
+        db,
+        dataset,
+        persist=payload.persist,
+        use_llm=payload.use_llm,
+        columns=payload.columns,
+    )
     return VariableReconcileResponse(
         dataset=dataset_to_summary(dataset),
         matches=[
@@ -216,6 +224,38 @@ def reconcile_variables(dataset_id: int, payload: VariableReconcileRequest, db: 
         unresolved_columns=result["unresolved_columns"],
         llm_used=bool(result["llm_used"]),
         notes=result["notes"],
+    )
+
+
+@router.post("/datasets/{dataset_id}/variables/manual", response_model=VariableReconcileResponse)
+def save_manual_variable_matches(dataset_id: int, payload: ManualVariableMatchRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(select(Dataset).where(Dataset.id == dataset_id))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    matches = save_manual_dataset_matches(
+        db,
+        dataset,
+        [item.model_dump() for item in payload.matches],
+    )
+    return VariableReconcileResponse(
+        dataset=dataset_to_summary(dataset),
+        matches=[
+            DatasetColumnMatchSummary(
+                id=item.id,
+                source_column=item.source_column,
+                canonical_name=item.canonical_name,
+                canonical_variable_id=item.canonical_variable_id,
+                confidence=float(item.confidence),
+                reasoning=item.reasoning,
+                status=item.status,
+                llm_used=bool(item.llm_used),
+            )
+            for item in matches
+        ],
+        unresolved_columns=[],
+        llm_used=False,
+        notes=["Manual mapping saved."],
     )
 
 

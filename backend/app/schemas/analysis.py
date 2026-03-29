@@ -164,6 +164,16 @@ class DatasetColumnMatchSummary(BaseModel):
 class VariableReconcileRequest(BaseModel):
     persist: bool = True
     use_llm: bool = True
+    columns: list[str] | None = None
+
+
+class ManualColumnMatchItem(BaseModel):
+    source_column: str
+    canonical_name: str
+
+
+class ManualVariableMatchRequest(BaseModel):
+    matches: list[ManualColumnMatchItem]
 
 
 class VariableReconcileResponse(BaseModel):

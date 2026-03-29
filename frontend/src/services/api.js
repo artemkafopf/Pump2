@@ -120,6 +120,17 @@ export async function reconcileVariables(datasetId, payload = {}) {
   return parseResponse(response);
 }
 
+export async function saveManualVariableMatches(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/variables/manual`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
 export async function fetchReports(datasetId) {
   const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/reports`);
   return parseResponse(response);

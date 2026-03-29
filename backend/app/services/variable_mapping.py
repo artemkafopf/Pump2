@@ -41,7 +41,7 @@ def normalize_column_name(value: str) -> str:
     for source, target in TOKEN_REPLACEMENTS.items():
         text = text.replace(source, target)
     text = re.sub(r"[_/\\\-]+", " ", text)
-    text = re.sub(r"[^0-9a-z\s]+", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -66,6 +66,40 @@ def canonicalize_name(value: str) -> str:
     if not normalized:
         return str(value or "").strip()
     return " ".join(part.capitalize() for part in normalized.split())
+
+
+def get_prior_column_examples(session: Session, dataset: Dataset, limit: int = 160) -> list[dict]:
+    datasets = list(
+        session.scalars(
+            select(Dataset)
+            .options(selectinload(Dataset.column_matches))
+            .where(Dataset.id != dataset.id)
+            .order_by(Dataset.created_at.desc())
+            .limit(50)
+        ).all()
+    )
+
+    examples: list[dict] = []
+    seen_headers: set[str] = set()
+
+    for item in datasets:
+        match_map = {match.source_column: match.canonical_name for match in item.column_matches}
+        for header in list(item.columns_json or []):
+            normalized = normalize_column_name(header)
+            if not normalized or normalized in seen_headers:
+                continue
+            seen_headers.add(normalized)
+            examples.append(
+                {
+                    "header": header,
+                    "canonical_name": match_map.get(header) or canonicalize_name(header),
+                    "dataset_name": item.name,
+                    "storage_section": item.storage_section,
+                }
+            )
+            if len(examples) >= limit:
+                return examples
+    return examples
 
 
 def get_dictionary(session: Session) -> list[CanonicalVariable]:
@@ -135,6 +169,7 @@ def ensure_alias(session: Session, canonical_variable: CanonicalVariable, alias_
 def heuristic_match(
     source_column: str,
     dictionary: list[CanonicalVariable],
+    prior_examples: list[dict] | None = None,
 ) -> tuple[str, float, str, CanonicalVariable | None]:
     if not dictionary:
         canonical_name = canonicalize_name(source_column)
@@ -161,20 +196,90 @@ def heuristic_match(
             best_variable,
         )
 
+    best_example = None
+    best_example_score = 0.0
+    for example in prior_examples or []:
+        score = score_similarity(source_column, example["header"])
+        if score > best_example_score:
+            best_example_score = score
+            best_example = example
+
+    if best_example is not None and best_example_score >= 0.78:
+        canonical_name = canonicalize_name(best_example["canonical_name"])
+        return (
+            canonical_name,
+            best_example_score,
+            (
+                "Matched by similarity against previous dataset header "
+                f"'{best_example['header']}' from '{best_example['dataset_name']}'."
+            ),
+            None,
+        )
+
     canonical_name = canonicalize_name(source_column)
     return canonical_name, max(best_score, 0.55), "Heuristic fallback created a new canonical variable.", None
 
 
-def llm_reconcile(columns: list[str]) -> tuple[dict[str, dict], bool, str | None]:
+def llm_reconcile(
+    columns: list[str],
+    dictionary: list[CanonicalVariable],
+    prior_examples: list[dict],
+) -> tuple[dict[str, dict], bool, str | None]:
+    candidate_lines: list[str] = []
+    for column in columns:
+        variable_candidates: list[tuple[float, str]] = []
+        for variable in dictionary:
+            aliases = [variable.canonical_name, *[alias.alias_name for alias in variable.aliases]]
+            score = max((score_similarity(column, alias) for alias in aliases), default=0.0)
+            if score >= 0.35:
+                variable_candidates.append(
+                    (
+                        score,
+                        f"canonical={variable.canonical_name} | aliases={', '.join(aliases[:6])}",
+                    )
+                )
+
+        prior_candidates: list[tuple[float, str]] = []
+        for example in prior_examples:
+            score = score_similarity(column, example["header"])
+            if score >= 0.35:
+                prior_candidates.append(
+                    (
+                        score,
+                        f"header={example['header']} => canonical={example['canonical_name']} | dataset={example['dataset_name']}",
+                    )
+                )
+
+        top_variable_candidates = [item for _, item in sorted(variable_candidates, key=lambda item: item[0], reverse=True)[:3]]
+        top_prior_candidates = [item for _, item in sorted(prior_candidates, key=lambda item: item[0], reverse=True)[:3]]
+        candidate_lines.append(
+            f"- {column}\n"
+            + (
+                "  possible canonical variables:\n    - "
+                + "\n    - ".join(top_variable_candidates)
+                if top_variable_candidates else
+                "  possible canonical variables:\n    - none"
+            )
+            + "\n"
+            + (
+                "  similar previous headers:\n    - "
+                + "\n    - ".join(top_prior_candidates)
+                if top_prior_candidates else
+                "  similar previous headers:\n    - none"
+            )
+        )
+
     system_prompt = (
         "You reconcile spreadsheet column names into canonical variables for pump and oilfield analytics. "
         "Return strict JSON with key 'matches'. Each item must include source_column, canonical_name, "
-        "confidence, description, reasoning."
+        "confidence, description, reasoning. Prefer canonical names that already exist in known variables "
+        "or closely match headers from previous datasets when appropriate."
     )
     user_prompt = (
-        "Columns:\n"
-        + "\n".join(f"- {column}" for column in columns)
-        + "\n\nGroup semantically equivalent headers under one canonical variable when appropriate."
+        "Columns to reconcile with candidate context:\n"
+        + "\n".join(candidate_lines)
+        + "\n\nGroup semantically equivalent headers under one canonical variable when appropriate. "
+        "Reuse an existing canonical variable whenever the meaning matches."
     )
     payload, ok, error = llm_client.chat_json(system_prompt, user_prompt)
     if not ok or not payload:
@@ -199,26 +304,35 @@ def reconcile_dataset_columns(
     dataset: Dataset,
     persist: bool = True,
     use_llm: bool = True,
+    columns: list[str] | None = None,
 ) -> dict:
     dictionary = get_dictionary(session)
+    prior_examples = get_prior_column_examples(session, dataset)
+    dataset_columns = list(dataset.columns_json)
+    requested_columns = [column for column in (columns or dataset_columns) if column in dataset_columns]
+    if not requested_columns:
+        requested_columns = dataset_columns
     llm_matches: dict[str, dict] = {}
     llm_used = False
     notes: list[str] = []
 
     if use_llm:
-        llm_matches, llm_used, llm_error = llm_reconcile(list(dataset.columns_json))
+        llm_matches, llm_used, llm_error = llm_reconcile(requested_columns, dictionary, prior_examples)
         if llm_error:
             notes.append(f"LLaMA fallback to heuristics: {llm_error}")
 
     if persist:
-        for item in get_dataset_matches(session, dataset.id):
-            session.delete(item)
+        existing_matches = get_dataset_matches(session, dataset.id)
+        target_columns = set(requested_columns)
+        for item in existing_matches:
+            if item.source_column in target_columns:
+                session.delete(item)
         session.flush()
 
     match_rows: list[DatasetColumnMatch] = []
     unresolved: list[str] = []
 
-    for column in list(dataset.columns_json):
+    for column in requested_columns:
         if column in llm_matches:
             llm_item = llm_matches[column]
             canonical_name = canonicalize_name(llm_item["canonical_name"])
@@ -229,7 +343,7 @@ def reconcile_dataset_columns(
             )
             description = llm_item.get("description")
         else:
-            canonical_name, confidence, reasoning, variable = heuristic_match(column, dictionary)
+            canonical_name, confidence, reasoning, variable = heuristic_match(column, dictionary, prior_examples)
             description = None
 
         status = "matched" if confidence >= 0.8 else "review"
@@ -324,3 +438,43 @@ def summarize_matches_by_canonical(matches: list[DatasetColumnMatch]) -> dict[st
     for match in matches:
         grouped[match.canonical_name].append(match.source_column)
     return dict(grouped)
+
+
+def save_manual_dataset_matches(
+    session: Session,
+    dataset: Dataset,
+    manual_matches: list[dict],
+) -> list[DatasetColumnMatch]:
+    existing_matches = get_dataset_matches(session, dataset.id)
+    for item in existing_matches:
+        session.delete(item)
+    session.flush()
+
+    saved_matches: list[DatasetColumnMatch] = []
+    available_columns = set(dataset.columns_json or [])
+
+    for item in manual_matches:
+        source_column = str(item.get("source_column") or "").strip()
+        canonical_name = canonicalize_name(item.get("canonical_name") or source_column)
+        if not source_column or source_column not in available_columns or not canonical_name:
+            continue
+
+        variable = get_or_create_canonical_variable(session, canonical_name)
+        ensure_alias(session, variable, source_column)
+        match = DatasetColumnMatch(
+            dataset_id=dataset.id,
+            canonical_variable_id=variable.id,
+            source_column=source_column,
+            canonical_name=canonical_name,
+            confidence=1.0,
+            reasoning="Manually assigned by user.",
+            status="matched",
+            llm_used=0,
+        )
+        session.add(match)
+        saved_matches.append(match)
+
+    session.commit()
+    for match in saved_matches:
+        session.refresh(match)
+    return saved_matches
