@@ -35,6 +35,26 @@ TOKEN_REPLACEMENTS = {
     "watercut": "water cut",
 }
 
+DOMAIN_CANONICAL_RULES = [
+    {
+        "canonical_name": (
+            "Прирост дебита жидкости, м3/сут; Прирост дебита газа, тыс. м3/сут; "
+            "Прирост приемистости воды, м3/сут; Закачка газа, тыс м3/сут; "
+            "(ВГВ Прирост приемистости газа, тыс. м3/сут)"
+        ),
+        "required_tokens": {
+            "прирост",
+            "дебита",
+            "жидкости",
+            "газа",
+            "приемистости",
+            "воды",
+            "закачка",
+        },
+        "reasoning": "Matched by explicit GTM composite increment rule.",
+    },
+]
+
 
 def normalize_column_name(value: str) -> str:
     text = str(value or "").strip().casefold()
@@ -171,6 +191,20 @@ def heuristic_match(
     dictionary: list[CanonicalVariable],
     prior_examples: list[dict] | None = None,
 ) -> tuple[str, float, str, CanonicalVariable | None]:
+    source_tokens = tokenize(source_column)
+    for rule in DOMAIN_CANONICAL_RULES:
+        if rule["required_tokens"].issubset(source_tokens):
+            variable = next(
+                (item for item in dictionary if item.canonical_name == rule["canonical_name"]),
+                None,
+            )
+            return (
+                rule["canonical_name"],
+                0.98,
+                rule["reasoning"],
+                variable,
+            )
+
     if not dictionary:
         canonical_name = canonicalize_name(source_column)
         return canonical_name, 0.55, "New canonical variable created from source column.", None

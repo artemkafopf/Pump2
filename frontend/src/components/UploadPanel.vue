@@ -3,8 +3,8 @@
     <div class="panel-header">
       <h2>Загрузка Excel</h2>
       <p>
-        После загрузки сервис сохранит таблицу и откроет окно выбора способа сопоставления заголовков:
-        через LLaMA или вручную.
+        После загрузки сервис сохранит таблицу и откроет окно распознавания заголовков:
+        сначала по словарю, а для спорных колонок можно включить LLaMA или задать соответствие вручную.
       </p>
     </div>
 
@@ -43,7 +43,7 @@ const STORAGE_SECTIONS = [
   { value: "fact_epu", label: "Факт ЭПУ" },
   { value: "plan_epu", label: "План ЭПУ" },
   { value: "production", label: "Добыча" },
-  { value: "plan_gtm", label: "План ГТМ" },
+  { value: "plan_gtm", label: "ГТМ" },
   { value: "fact_krs", label: "Факт КРС" },
   { value: "plan_krs", label: "План КРС" },
   { value: "gtm_rating", label: "Рейтинг ГТМ" },

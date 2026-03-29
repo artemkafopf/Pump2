@@ -28,16 +28,6 @@
             <button
               type="button"
               class="dataset-item module-item"
-              :class="{ active: activeModule === 'analysis' }"
-              @click="activeModule = 'analysis'"
-            >
-              <span class="dataset-name">Анализ работы насосов</span>
-              <span class="dataset-meta">Использует только датасет из раздела "Факт ЭПУ"</span>
-            </button>
-
-            <button
-              type="button"
-              class="dataset-item module-item"
               :class="{ active: activeModule === 'semantic' }"
               @click="activeModule = 'semantic'"
             >
@@ -48,11 +38,31 @@
             <button
               type="button"
               class="dataset-item module-item"
+              :class="{ active: activeModule === 'analysis' }"
+              @click="activeModule = 'analysis'"
+            >
+              <span class="dataset-name">Анализ работы насосов</span>
+              <span class="dataset-meta">Использует только датасет из раздела "Факт ЭПУ"</span>
+            </button>
+
+            <button
+              type="button"
+              class="dataset-item module-item"
               :class="{ active: activeModule === 'forecast' }"
               @click="activeModule = 'forecast'"
             >
-              <span class="dataset-name">Прогноз отказов</span>
+              <span class="dataset-name">Настройка модели отказов</span>
               <span class="dataset-meta">Использует только датасет из раздела "Факт ЭПУ"</span>
+            </button>
+
+            <button
+              type="button"
+              class="dataset-item module-item"
+              :class="{ active: activeModule === 'repairForecast' }"
+              @click="activeModule = 'repairForecast'"
+            >
+              <span class="dataset-name">Прогноз ремонтов</span>
+              <span class="dataset-meta">Факт ЭПУ + Добыча + ГТМ, посуточная матрица отказов</span>
             </button>
           </div>
         </section>
@@ -66,16 +76,31 @@
           <section class="modal-card">
             <div class="panel-header">
               <div>
-                <h2>Распознавание заголовков</h2>
+                <h2>
+                  {{ mappingDialog.stage === "columns" ? "Распознавание заголовков" : "Распознавание строк" }}
+                </h2>
                 <p>
-                  На этом подэтапе заголовки нового файла сопоставляются со словарём канонических переменных.
-                  Нераспознанные строки подсвечены красным. Для них можно выбрать существующую переменную,
-                  создать новую или отдельно запустить распознавание через LLM.
+                  <template v-if="mappingDialog.stage === 'columns'">
+                    На этом подэтапе заголовки нового файла сопоставляются со словарем канонических переменных.
+                    Нераспознанные строки подсвечены красным. Для них можно выбрать существующую переменную,
+                    создать новую или отдельно запустить распознавание через LLM.
+                  </template>
+                  <template v-else>
+                    После заголовков система предлагает сопоставить значения строк для сущностей
+                    <strong>Участок недр</strong>, <strong>Куст</strong> и <strong>Скважина</strong>.
+                    Нераспознанные значения подсвечены красным: их можно связать с уже известным значением
+                    из словаря или создать новое каноническое значение.
+                  </template>
                 </p>
               </div>
             </div>
 
-            <div class="table-wrap compact-table">
+            <div class="table-meta recognition-stage-meta">
+              <span :class="{ active: mappingDialog.stage === 'columns' }">1. Заголовки</span>
+              <span :class="{ active: mappingDialog.stage === 'entities' }">2. Строки</span>
+            </div>
+
+            <div v-if="mappingDialog.stage === 'columns'" class="table-wrap compact-table">
               <table class="data-table">
                 <thead>
                   <tr>
@@ -141,14 +166,75 @@
               </table>
             </div>
 
+            <div v-else class="table-wrap compact-table">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Тип сущности</th>
+                    <th>Значение в файле</th>
+                    <th>Каноническое значение</th>
+                    <th>Уверенность</th>
+                    <th>Комментарий</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="row in mappingDialog.entityRows"
+                    :key="`${row.entity_type}-${row.source_value}`"
+                    :class="{ 'manual-row-unresolved': row.unresolved }"
+                  >
+                    <td>{{ entityTypeLabel(row.entity_type) }}</td>
+                    <td>{{ row.source_value }}</td>
+                    <td>
+                      <select v-model="row.selectionMode" class="manual-match-input">
+                        <option value="dictionary">Выбрать из словаря</option>
+                        <option value="new">Создать новое каноническое значение</option>
+                      </select>
+
+                      <select
+                        v-if="row.selectionMode === 'dictionary'"
+                        v-model="row.canonical_value"
+                        class="manual-match-input manual-match-secondary"
+                      >
+                        <option value="">Не выбрано</option>
+                        <option
+                          v-for="item in entityOptionsByType(row.entity_type)"
+                          :key="`${row.entity_type}-${item.id}`"
+                          :value="item.canonical_value"
+                        >
+                          {{ item.canonical_value }}
+                        </option>
+                      </select>
+
+                      <input
+                        v-else
+                        v-model.trim="row.new_canonical_value"
+                        type="text"
+                        class="manual-match-input manual-match-secondary"
+                        placeholder="Введите новое каноническое значение"
+                      />
+                    </td>
+                    <td>{{ formatConfidence(row.confidence) }}</td>
+                    <td>{{ row.reasoning || (row.unresolved ? "Словарь не дал уверенного совпадения" : "Совпадение по словарю") }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
             <div class="prediction-actions">
               <button
                 type="button"
                 class="primary-button"
                 :disabled="mappingDialog.applying"
-                @click="saveRecognizedMappings"
+                @click="handleMappingPrimaryAction"
               >
-                {{ mappingDialog.applying ? "Сохранение..." : "Сохранить распознанные заголовки" }}
+                {{
+                  mappingDialog.applying
+                    ? "Сохранение..."
+                    : mappingDialog.stage === "columns"
+                      ? "Продолжить к сопоставлению строк"
+                      : "Сохранить распознанные строки"
+                }}
               </button>
               <button type="button" class="file-button" :disabled="mappingDialog.applying" @click="closeMappingDialog">
                 Закрыть
@@ -211,10 +297,15 @@
           />
 
           <PredictionModule
-            v-else-if="factDataset && factAnalysis"
+            v-else-if="activeModule === 'forecast' && factDataset && factAnalysis"
             :dataset="factDataset.dataset"
             :analysis="factAnalysis"
             :rows="factDataset.rows"
+          />
+
+          <RepairForecastModule
+            v-else-if="activeModule === 'repairForecast' && factDataset"
+            :dataset="factDataset.dataset"
           />
         </template>
 
@@ -236,15 +327,19 @@ import AIWorkbench from "./components/AIWorkbench.vue";
 import DashboardView from "./components/DashboardView.vue";
 import PredictionModule from "./components/PredictionModule.vue";
 import RawTable from "./components/RawTable.vue";
+import RepairForecastModule from "./components/RepairForecastModule.vue";
 import SelectionPanel from "./components/SelectionPanel.vue";
 import StoragePanel from "./components/StoragePanel.vue";
 import UploadPanel from "./components/UploadPanel.vue";
 import {
+  fetchEntityDictionary,
   fetchAnalysis,
   fetchDataset,
   fetchVariableDictionary,
   listDatasets,
+  reconcileEntities,
   reconcileVariables,
+  saveManualEntityMatches,
   saveManualVariableMatches,
   updateDatasetSelection,
   uploadDataset,
@@ -270,8 +365,11 @@ const mappingDialog = ref({
   open: false,
   datasetId: null,
   applying: false,
+  stage: "columns",
   dictionary: [],
   rows: [],
+  entityDictionary: [],
+  entityRows: [],
 });
 
 const displayDataset = computed(() => (activeModule.value === "storage" ? storageDataset.value : factDataset.value));
@@ -297,6 +395,25 @@ function mapSuggestionRows(matches, dictionary) {
       unresolved: !recognized,
       selectionMode: recognized && dictionaryNames.has(item.canonical_name) ? "dictionary" : "new",
       llmLoading: false,
+    };
+  });
+}
+
+function mapEntitySuggestionRows(matches, dictionary, unresolvedValues = {}) {
+  return matches.map((item) => {
+    const entityOptions = dictionary.filter((entry) => entry.entity_type === item.entity_type);
+    const hasDictionaryValue = entityOptions.some((entry) => entry.canonical_value === item.canonical_value);
+    const unresolved = (unresolvedValues[item.entity_type] || []).includes(item.source_value) || item.confidence < 0.8;
+    return {
+      entity_type: item.entity_type,
+      source_value: item.source_value,
+      canonical_value: hasDictionaryValue && !unresolved ? item.canonical_value : "",
+      suggested_value: item.canonical_value || "",
+      new_canonical_value: unresolved ? item.canonical_value || item.source_value : item.canonical_value || "",
+      confidence: item.confidence ?? 0,
+      reasoning: item.reasoning || "",
+      unresolved,
+      selectionMode: hasDictionaryValue && !unresolved ? "dictionary" : "new",
     };
   });
 }
@@ -374,8 +491,30 @@ async function openRecognitionStage(datasetId) {
     open: true,
     datasetId,
     applying: false,
+    stage: "columns",
     dictionary,
     rows: mapSuggestionRows(response.matches, dictionary),
+    entityDictionary: [],
+    entityRows: [],
+  };
+}
+
+async function openEntityRecognitionStage(datasetId) {
+  const [entityDictionary, response] = await Promise.all([
+    fetchEntityDictionary(),
+    reconcileEntities(datasetId, {
+      persist: false,
+    }),
+  ]);
+
+  mappingDialog.value = {
+    ...mappingDialog.value,
+    open: true,
+    datasetId,
+    applying: false,
+    stage: "entities",
+    entityDictionary,
+    entityRows: mapEntitySuggestionRows(response.matches, entityDictionary, response.unresolved_values || {}),
   };
 }
 
@@ -456,6 +595,47 @@ async function saveRecognizedMappings() {
       })),
     });
 
+    await openEntityRecognitionStage(mappingDialog.value.datasetId);
+  } catch (error) {
+    errorMessage.value = error.message;
+    mappingDialog.value = {
+      ...mappingDialog.value,
+      applying: false,
+    };
+  }
+}
+
+async function saveRecognizedEntities() {
+  if (!mappingDialog.value.datasetId) {
+    return;
+  }
+
+  const invalidRows = mappingDialog.value.entityRows.filter((row) => {
+    if (row.selectionMode === "dictionary") {
+      return !row.canonical_value;
+    }
+    return !row.new_canonical_value.trim();
+  });
+
+  if (invalidRows.length) {
+    errorMessage.value = "Для всех красных строк нужно выбрать каноническое значение или создать новое.";
+    return;
+  }
+
+  try {
+    mappingDialog.value = {
+      ...mappingDialog.value,
+      applying: true,
+    };
+
+    await saveManualEntityMatches(mappingDialog.value.datasetId, {
+      matches: mappingDialog.value.entityRows.map((row) => ({
+        entity_type: row.entity_type,
+        source_value: row.source_value,
+        canonical_value: row.selectionMode === "dictionary" ? row.canonical_value : row.new_canonical_value.trim(),
+      })),
+    });
+
     closeMappingDialog();
   } catch (error) {
     errorMessage.value = error.message;
@@ -466,13 +646,24 @@ async function saveRecognizedMappings() {
   }
 }
 
+async function handleMappingPrimaryAction() {
+  if (mappingDialog.value.stage === "columns") {
+    await saveRecognizedMappings();
+    return;
+  }
+  await saveRecognizedEntities();
+}
+
 function closeMappingDialog() {
   mappingDialog.value = {
     open: false,
     datasetId: null,
     applying: false,
+    stage: "columns",
     dictionary: [],
     rows: [],
+    entityDictionary: [],
+    entityRows: [],
   };
 }
 
@@ -518,6 +709,20 @@ function formatConfidence(value) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value ?? 0);
+}
+
+function entityTypeLabel(entityType) {
+  return (
+    {
+      license_area: "Участок недр",
+      cluster: "Куст",
+      well: "Скважина",
+    }[entityType] || entityType
+  );
+}
+
+function entityOptionsByType(entityType) {
+  return mappingDialog.value.entityDictionary.filter((item) => item.entity_type === entityType);
 }
 
 onMounted(async () => {

@@ -6,18 +6,25 @@ from app.db.database import get_db
 from app.db.models import Dataset, Record, TrainedModel
 from app.schemas.analysis import (
     AnalysisResponse,
+    CanonicalEntitySummary,
     CanonicalVariableSummary,
     ColumnSelectionUpdate,
     DatasetDetail,
     DatasetColumnMatchSummary,
+    DatasetEntityMatchSummary,
     DatasetSummary,
+    EntityReconcileRequest,
+    EntityReconcileResponse,
     ForecastModelResponse,
     ForecastPredictRequest,
     ForecastPredictResponse,
     ForecastTrainRequest,
     GeneratedReportSummary,
     LLMStatusResponse,
+    ManualEntityMatchRequest,
     ManualVariableMatchRequest,
+    RepairForecastRequest,
+    RepairForecastResponse,
     ReportGenerateRequest,
     SaveForecastModelRequest,
     SavedModelSummary,
@@ -42,6 +49,13 @@ from app.services.analysis import (
 )
 from app.services.llm_client import llm_client
 from app.services.reporting import generate_report, list_reports
+from app.services.repair_forecast import build_repair_forecast
+from app.services.row_mapping import (
+    entity_dictionary_snapshot,
+    get_dataset_entity_matches,
+    reconcile_dataset_entities,
+    save_manual_entity_matches,
+)
 from app.services.variable_mapping import (
     dictionary_snapshot,
     get_dataset_matches,
@@ -60,6 +74,11 @@ def get_llm_status():
 @router.get("/variables/dictionary", response_model=list[CanonicalVariableSummary])
 def get_variable_dictionary(db: Session = Depends(get_db)):
     return [CanonicalVariableSummary(**item) for item in dictionary_snapshot(db)]
+
+
+@router.get("/entities/dictionary", response_model=list[CanonicalEntitySummary])
+def get_entity_dictionary_items(db: Session = Depends(get_db)):
+    return [CanonicalEntitySummary(**item) for item in entity_dictionary_snapshot(db)]
 
 
 @router.get("/datasets", response_model=list[DatasetSummary])
@@ -259,6 +278,96 @@ def save_manual_variable_matches(dataset_id: int, payload: ManualVariableMatchRe
     )
 
 
+@router.get("/datasets/{dataset_id}/entities/matches", response_model=list[DatasetEntityMatchSummary])
+def get_dataset_entities(dataset_id: int, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset)
+        .options(selectinload(Dataset.entity_matches))
+        .where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    return [
+        DatasetEntityMatchSummary(
+            id=item.id,
+            entity_type=item.entity_type,
+            source_value=item.source_value,
+            canonical_value=item.canonical_value,
+            canonical_entity_id=item.canonical_entity_id,
+            confidence=float(item.confidence),
+            reasoning=item.reasoning,
+            status=item.status,
+        )
+        for item in get_dataset_entity_matches(db, dataset_id)
+    ]
+
+
+@router.post("/datasets/{dataset_id}/entities/reconcile", response_model=EntityReconcileResponse)
+def reconcile_entities(dataset_id: int, payload: EntityReconcileRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset)
+        .options(selectinload(Dataset.records), selectinload(Dataset.column_matches))
+        .where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    result = reconcile_dataset_entities(db, dataset, persist=payload.persist)
+    return EntityReconcileResponse(
+        dataset=dataset_to_summary(dataset),
+        matches=[
+            DatasetEntityMatchSummary(
+                id=item.id,
+                entity_type=item.entity_type,
+                source_value=item.source_value,
+                canonical_value=item.canonical_value,
+                canonical_entity_id=item.canonical_entity_id,
+                confidence=float(item.confidence),
+                reasoning=item.reasoning,
+                status=item.status,
+            )
+            for item in result["matches"]
+        ],
+        unresolved_values=result["unresolved_values"],
+        resolved_columns=result["resolved_columns"],
+    )
+
+
+@router.post("/datasets/{dataset_id}/entities/manual", response_model=EntityReconcileResponse)
+def save_manual_entities(dataset_id: int, payload: ManualEntityMatchRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset)
+        .options(selectinload(Dataset.records), selectinload(Dataset.column_matches))
+        .where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    matches = save_manual_entity_matches(
+        db,
+        dataset,
+        [item.model_dump() for item in payload.matches],
+    )
+    return EntityReconcileResponse(
+        dataset=dataset_to_summary(dataset),
+        matches=[
+            DatasetEntityMatchSummary(
+                id=item.id,
+                entity_type=item.entity_type,
+                source_value=item.source_value,
+                canonical_value=item.canonical_value,
+                canonical_entity_id=item.canonical_entity_id,
+                confidence=float(item.confidence),
+                reasoning=item.reasoning,
+                status=item.status,
+            )
+            for item in matches
+        ],
+        unresolved_values={},
+        resolved_columns=reconcile_dataset_entities(db, dataset, persist=False)["resolved_columns"],
+    )
+
+
 @router.post("/datasets/{dataset_id}/forecast/train", response_model=ForecastModelResponse)
 def train_dataset_forecast(dataset_id: int, payload: ForecastTrainRequest, db: Session = Depends(get_db)):
     dataset = db.scalar(
@@ -339,6 +448,31 @@ def predict_dataset_forecast(dataset_id: int, payload: ForecastPredictRequest, d
         test_fraction=payload.test_fraction,
         random_seed=payload.random_seed,
     )
+
+
+@router.post("/datasets/{dataset_id}/repair-forecast", response_model=RepairForecastResponse)
+def calculate_repair_forecast(dataset_id: int, payload: RepairForecastRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset)
+        .options(selectinload(Dataset.records), selectinload(Dataset.trained_models), selectinload(Dataset.column_matches))
+        .where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    if dataset.storage_section != "fact_epu":
+        raise HTTPException(status_code=400, detail="Repair forecast can only be calculated from the 'Факт ЭПУ' dataset.")
+
+    try:
+        return build_repair_forecast(
+            db,
+            dataset,
+            model_id=payload.model_id,
+            base_failure_coefficient=payload.base_failure_coefficient,
+            nominal_gap_coefficient=payload.nominal_gap_coefficient,
+            manual_feature_values=payload.manual_feature_values,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/datasets/{dataset_id}/reports", response_model=list[GeneratedReportSummary])

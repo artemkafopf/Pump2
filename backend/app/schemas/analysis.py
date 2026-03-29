@@ -184,6 +184,45 @@ class VariableReconcileResponse(BaseModel):
     notes: list[str]
 
 
+class CanonicalEntitySummary(BaseModel):
+    id: int
+    entity_type: str
+    canonical_value: str
+    aliases: list[str]
+
+
+class DatasetEntityMatchSummary(BaseModel):
+    id: int | None = None
+    entity_type: str
+    source_value: str
+    canonical_value: str
+    canonical_entity_id: int | None = None
+    confidence: float
+    reasoning: str | None = None
+    status: str
+
+
+class EntityReconcileRequest(BaseModel):
+    persist: bool = True
+
+
+class ManualEntityMatchItem(BaseModel):
+    entity_type: str
+    source_value: str
+    canonical_value: str
+
+
+class ManualEntityMatchRequest(BaseModel):
+    matches: list[ManualEntityMatchItem]
+
+
+class EntityReconcileResponse(BaseModel):
+    dataset: DatasetSummary
+    matches: list[DatasetEntityMatchSummary]
+    unresolved_values: dict[str, list[str]]
+    resolved_columns: dict[str, str | None]
+
+
 class ReportGenerateRequest(BaseModel):
     report_type: str = "analysis_forecast"
     model_id: int | None = None
@@ -199,3 +238,39 @@ class GeneratedReportSummary(BaseModel):
     content: str
     llm_used: bool
     created_at: datetime
+
+
+class RepairForecastRequest(BaseModel):
+    model_id: int | None = None
+    base_failure_coefficient: float = 1.1
+    nominal_gap_coefficient: float = -0.8
+    manual_feature_values: dict[str, float | int | str | None] = {}
+
+
+class RepairForecastSourceDataset(BaseModel):
+    label: str
+    dataset: DatasetSummary | None = None
+
+
+class RepairForecastRow(BaseModel):
+    category: str
+    field_name: str | None = None
+    license_area: str | None = None
+    cluster_name: str | None = None
+    well_name: str
+    predicted_nno: float | None = None
+    actual_nno: float | None = None
+    runtime_days: float | None = None
+    event_dates: list[str] = []
+    statuses: list[int]
+
+
+class RepairForecastResponse(BaseModel):
+    start_date: str
+    end_date: str
+    dates: list[str]
+    used_feature_columns: list[str]
+    missing_feature_columns: list[str]
+    source_datasets: list[RepairForecastSourceDataset]
+    rows: list[RepairForecastRow]
+    notes: list[str]

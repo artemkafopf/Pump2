@@ -44,6 +44,11 @@ class Dataset(Base):
         cascade="all, delete-orphan",
         order_by="GeneratedReport.created_at.desc()",
     )
+    entity_matches: Mapped[list["DatasetEntityMatch"]] = relationship(
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+        order_by="DatasetEntityMatch.entity_type, DatasetEntityMatch.source_value",
+    )
 
 
 class Record(Base):
@@ -163,3 +168,69 @@ class GeneratedReport(Base):
 
     dataset: Mapped[Dataset] = relationship(back_populates="generated_reports")
     trained_model: Mapped[TrainedModel | None] = relationship()
+
+
+class CanonicalEntityValue(Base):
+    __tablename__ = "canonical_entity_values"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    canonical_value: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    normalized_value: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    aliases: Mapped[list["EntityValueAlias"]] = relationship(
+        back_populates="canonical_entity",
+        cascade="all, delete-orphan",
+        order_by="EntityValueAlias.alias_value",
+    )
+    dataset_matches: Mapped[list["DatasetEntityMatch"]] = relationship(
+        back_populates="canonical_entity",
+        cascade="all, delete-orphan",
+    )
+
+
+class EntityValueAlias(Base):
+    __tablename__ = "entity_value_aliases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    canonical_entity_id: Mapped[int] = mapped_column(ForeignKey("canonical_entity_values.id"), nullable=False, index=True)
+    alias_value: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    normalized_alias: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    canonical_entity: Mapped[CanonicalEntityValue] = relationship(back_populates="aliases")
+
+
+class DatasetEntityMatch(Base):
+    __tablename__ = "dataset_entity_matches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_id: Mapped[int] = mapped_column(ForeignKey("datasets.id"), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    canonical_entity_id: Mapped[int | None] = mapped_column(
+        ForeignKey("canonical_entity_values.id"),
+        nullable=True,
+        index=True,
+    )
+    canonical_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="suggested")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    dataset: Mapped[Dataset] = relationship(back_populates="entity_matches")
+    canonical_entity: Mapped[CanonicalEntityValue | None] = relationship(back_populates="dataset_matches")

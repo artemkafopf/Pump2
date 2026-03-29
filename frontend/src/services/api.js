@@ -104,6 +104,11 @@ export async function fetchVariableDictionary() {
   return parseResponse(response);
 }
 
+export async function fetchEntityDictionary() {
+  const response = await fetch(`${API_BASE_URL}/entities/dictionary`);
+  return parseResponse(response);
+}
+
 export async function fetchVariableMatches(datasetId) {
   const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/variables/matches`);
   return parseResponse(response);
@@ -131,6 +136,33 @@ export async function saveManualVariableMatches(datasetId, payload) {
   return parseResponse(response);
 }
 
+export async function fetchEntityMatches(datasetId) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/entities/matches`);
+  return parseResponse(response);
+}
+
+export async function reconcileEntities(datasetId, payload = {}) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/entities/reconcile`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
+export async function saveManualEntityMatches(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/entities/manual`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
 export async function fetchReports(datasetId) {
   const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/reports`);
   return parseResponse(response);
@@ -138,6 +170,17 @@ export async function fetchReports(datasetId) {
 
 export async function generateReport(datasetId, payload) {
   const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/reports/generate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
+export async function calculateRepairForecast(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/repair-forecast`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

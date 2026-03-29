@@ -6,7 +6,16 @@ from app.api.routes import router
 from app.core.config import settings
 from app.db.database import Base, engine
 from app.db.database import SessionLocal
-from app.db.models import CanonicalVariable, DatasetColumnMatch, GeneratedReport, TrainedModel, VariableAlias
+from app.db.models import (
+    CanonicalEntityValue,
+    CanonicalVariable,
+    DatasetColumnMatch,
+    DatasetEntityMatch,
+    EntityValueAlias,
+    GeneratedReport,
+    TrainedModel,
+    VariableAlias,
+)
 from app.services.variable_mapping import seed_default_dictionary
 
 
