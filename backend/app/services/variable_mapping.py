@@ -467,6 +467,18 @@ def dictionary_snapshot(session: Session) -> list[dict]:
     return result
 
 
+def clear_variable_dictionary(session: Session) -> dict[str, int]:
+    removed_matches = session.query(DatasetColumnMatch).delete()
+    removed_aliases = session.query(VariableAlias).delete()
+    removed_variables = session.query(CanonicalVariable).delete()
+    session.commit()
+    return {
+        "removed_matches": int(removed_matches or 0),
+        "removed_aliases": int(removed_aliases or 0),
+        "removed_variables": int(removed_variables or 0),
+    }
+
+
 def summarize_matches_by_canonical(matches: list[DatasetColumnMatch]) -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = defaultdict(list)
     for match in matches:

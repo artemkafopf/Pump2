@@ -119,7 +119,11 @@
                   >
                     <td>{{ row.source_column }}</td>
                     <td>
-                      <select v-model="row.selectionMode" class="manual-match-input">
+                      <select
+                        v-model="row.selectionMode"
+                        class="manual-match-input"
+                        @change="handleColumnSelectionModeChange(row)"
+                      >
                         <option value="dictionary">Выбрать из словаря</option>
                         <option value="new">Создать новую каноническую переменную</option>
                       </select>
@@ -270,6 +274,8 @@
               :selected-dataset-id="storageDatasetId"
               @section-change="handleStorageSectionChange"
               @select="loadStorageDataset"
+              @edit-mappings="handleEditMappings"
+              @clear-dictionary="handleClearDictionary"
             />
           </template>
 
@@ -332,10 +338,13 @@ import SelectionPanel from "./components/SelectionPanel.vue";
 import StoragePanel from "./components/StoragePanel.vue";
 import UploadPanel from "./components/UploadPanel.vue";
 import {
+  clearVariableDictionary,
   fetchEntityDictionary,
+  fetchEntityMatches,
   fetchAnalysis,
   fetchDataset,
   fetchVariableDictionary,
+  fetchVariableMatches,
   listDatasets,
   reconcileEntities,
   reconcileVariables,
@@ -478,14 +487,26 @@ async function refreshDatasets() {
   await ensureFactDatasetLoaded();
 }
 
-async function openRecognitionStage(datasetId) {
-  const [dictionary, response] = await Promise.all([
-    fetchVariableDictionary(),
-    reconcileVariables(datasetId, {
+async function openRecognitionStage(datasetId, options = {}) {
+  const { preferSaved = false } = options;
+  const dictionary = await fetchVariableDictionary();
+  let response;
+
+  if (preferSaved) {
+    const existingMatches = await fetchVariableMatches(datasetId);
+    if (existingMatches.length) {
+      response = {
+        matches: existingMatches,
+      };
+    }
+  }
+
+  if (!response) {
+    response = await reconcileVariables(datasetId, {
       persist: false,
       use_llm: false,
-    }),
-  ]);
+    });
+  }
 
   mappingDialog.value = {
     open: true,
@@ -499,13 +520,26 @@ async function openRecognitionStage(datasetId) {
   };
 }
 
-async function openEntityRecognitionStage(datasetId) {
-  const [entityDictionary, response] = await Promise.all([
-    fetchEntityDictionary(),
-    reconcileEntities(datasetId, {
+async function openEntityRecognitionStage(datasetId, options = {}) {
+  const { preferSaved = false } = options;
+  const entityDictionary = await fetchEntityDictionary();
+  let response;
+
+  if (preferSaved) {
+    const existingMatches = await fetchEntityMatches(datasetId);
+    if (existingMatches.length) {
+      response = {
+        matches: existingMatches,
+        unresolved_values: {},
+      };
+    }
+  }
+
+  if (!response) {
+    response = await reconcileEntities(datasetId, {
       persist: false,
-    }),
-  ]);
+    });
+  }
 
   mappingDialog.value = {
     ...mappingDialog.value,
@@ -704,6 +738,35 @@ async function handleStorageSectionChange(section) {
   await loadStorageDataset(nextDatasetId);
 }
 
+async function handleEditMappings(datasetId) {
+  if (!datasetId) {
+    return;
+  }
+
+  try {
+    errorMessage.value = "";
+    await openRecognitionStage(datasetId, { preferSaved: true });
+  } catch (error) {
+    errorMessage.value = error.message;
+  }
+}
+
+async function handleClearDictionary() {
+  const confirmed = window.confirm(
+    "Очистить словарь канонических переменных и все сохраненные сопоставления столбцов? Загруженные датасеты останутся на месте.",
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    errorMessage.value = "";
+    await clearVariableDictionary();
+  } catch (error) {
+    errorMessage.value = error.message;
+  }
+}
+
 function formatConfidence(value) {
   return new Intl.NumberFormat("ru-RU", {
     minimumFractionDigits: 2,
@@ -723,6 +786,12 @@ function entityTypeLabel(entityType) {
 
 function entityOptionsByType(entityType) {
   return mappingDialog.value.entityDictionary.filter((item) => item.entity_type === entityType);
+}
+
+function handleColumnSelectionModeChange(row) {
+  if (row.selectionMode === "new" && !row.new_canonical_name?.trim()) {
+    row.new_canonical_name = row.source_column || "";
+  }
 }
 
 onMounted(async () => {

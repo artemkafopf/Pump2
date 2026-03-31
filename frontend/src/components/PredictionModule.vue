@@ -191,8 +191,18 @@
 
     <section class="panel">
       <div class="panel-header">
-        <h2>Номограмма</h2>
-        <p>Изолинии показывают прогнозное значение целевой переменной по двум выбранным числовым признакам.</p>
+        <div>
+          <h2>Номограмма</h2>
+          <p>Изолинии показывают прогнозное значение целевой переменной по двум выбранным числовым признакам.</p>
+        </div>
+        <button
+          type="button"
+          class="file-button"
+          :disabled="exportingContour || !contourXFeature || !contourYFeature"
+          @click="handleExportContour"
+        >
+          {{ exportingContour ? "Выгрузка..." : "Выгрузить Excel" }}
+        </button>
       </div>
 
       <div class="control-block">
@@ -277,7 +287,7 @@
 <script setup>
 import { computed, ref, watch } from "vue";
 import PlotlyChart from "./PlotlyChart.vue";
-import { listSavedForecastModels, predictForecast, saveForecastModel, trainForecastModel } from "../services/api";
+import { exportForecastContour, listSavedForecastModels, predictForecast, saveForecastModel, trainForecastModel } from "../services/api";
 
 const props = defineProps({
   dataset: { type: Object, required: true },
@@ -293,6 +303,7 @@ const modelInfo = ref(null);
 const savedModels = ref([]);
 const selectedSavedModelId = ref(null);
 const savingModel = ref(false);
+const exportingContour = ref(false);
 const predictionResponse = ref(null);
 const datasetPredictionResponse = ref(null);
 const enabledFeatureColumns = ref([]);
@@ -301,7 +312,7 @@ const contourXFeature = ref("");
 const contourYFeature = ref("");
 const selectedContourSliceColumn = ref("");
 const selectedContourSliceValue = ref("");
-const selectedContourPalette = ref("softBlue");
+const selectedContourPalette = ref("rainbow");
 const selectedTimeColumn = ref("");
 const selectedGroupColumn = ref("");
 const selectedGroupValues = ref([]);
@@ -375,40 +386,24 @@ const modelFeatureColumns = computed(() => {
 });
 
 const contourPaletteOptions = [
-  { value: "softBlue", label: "Светло-голубая" },
-  { value: "contrast", label: "Контрастная" },
-  { value: "warm", label: "Тёплая" },
-  { value: "green", label: "Бирюзовая" },
+  { value: "rainbow", label: "Разноцветная" },
+  { value: "monoAccent", label: "Одноцветная" },
 ];
 
 const contourColorScales = {
-  softBlue: [
-    [0, "#dbeafe"],
-    [0.25, "#bfdbfe"],
-    [0.5, "#93c5fd"],
-    [0.75, "#60a5fa"],
-    [1, "#1d4ed8"],
+  rainbow: [
+    [0, "#2563eb"],
+    [0.25, "#10b981"],
+    [0.5, "#fde047"],
+    [0.75, "#f97316"],
+    [1, "#dc2626"],
   ],
-  contrast: [
-    [0, "#e0f2fe"],
-    [0.2, "#7dd3fc"],
-    [0.45, "#38bdf8"],
-    [0.7, "#0ea5e9"],
-    [1, "#1e3a8a"],
-  ],
-  warm: [
-    [0, "#fff7ed"],
-    [0.25, "#fed7aa"],
-    [0.5, "#fdba74"],
-    [0.75, "#fb923c"],
-    [1, "#c2410c"],
-  ],
-  green: [
-    [0, "#ecfeff"],
-    [0.25, "#a5f3fc"],
-    [0.5, "#67e8f9"],
-    [0.75, "#2dd4bf"],
-    [1, "#0f766e"],
+  monoAccent: [
+    [0, "#1e1b4b"],
+    [0.25, "#312e81"],
+    [0.5, "#4f46e5"],
+    [0.75, "#6366f1"],
+    [1, "#a78bfa"],
   ],
 };
 
@@ -695,6 +690,34 @@ async function refreshContour() {
   predictionResponse.value = response;
 }
 
+async function handleExportContour() {
+  if (!contourXFeature.value || !contourYFeature.value) return;
+  exportingContour.value = true;
+  try {
+    const blob = await exportForecastContour(props.dataset.id, {
+      model_id: selectedSavedModelId.value || null,
+      feature_columns: modelFeatureColumns.value,
+      rows: props.rows,
+      x_feature: contourXFeature.value,
+      y_feature: contourYFeature.value,
+      slice_overrides: contourSliceOverrides.value,
+      test_fraction: testFraction.value,
+      random_seed: randomSeed.value,
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `nomogram_${props.dataset.name}_v${props.dataset.storage_version}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } finally {
+    exportingContour.value = false;
+  }
+}
+
 watch(
   () => [
     contourXFeature.value,
@@ -711,7 +734,7 @@ watch(
 
 const contourData = computed(() => {
   if (!predictionResponse.value?.contour) return [];
-  const colorscale = contourColorScales[selectedContourPalette.value] || contourColorScales.softBlue;
+  const colorscale = contourColorScales[selectedContourPalette.value] || contourColorScales.rainbow;
   return [
     {
       type: "contour",

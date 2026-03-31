@@ -184,6 +184,12 @@ class VariableReconcileResponse(BaseModel):
     notes: list[str]
 
 
+class DictionaryClearResponse(BaseModel):
+    removed_matches: int
+    removed_aliases: int
+    removed_variables: int
+
+
 class CanonicalEntitySummary(BaseModel):
     id: int
     entity_type: str

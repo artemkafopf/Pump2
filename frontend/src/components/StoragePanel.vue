@@ -1,8 +1,23 @@
 <template>
   <section class="panel">
     <div class="panel-header">
-      <h2>Хранение данных</h2>
-      <p>Выберите раздел хранения и версию набора данных, с которой будем работать в анализе и прогнозе.</p>
+      <div>
+        <h2>Хранение данных</h2>
+        <p>Выберите раздел хранения и версию набора данных, с которой будем работать в анализе и прогнозе.</p>
+      </div>
+      <div class="inline-actions">
+        <button
+          type="button"
+          class="file-button"
+          :disabled="!currentDataset"
+          @click="emit('edit-mappings', currentDataset?.id)"
+        >
+          Редактировать сопоставления
+        </button>
+        <button type="button" class="file-button" @click="emit('clear-dictionary')">
+          Очистить словарь
+        </button>
+      </div>
     </div>
 
     <div class="control-block">
@@ -81,7 +96,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["section-change", "select"]);
+const emit = defineEmits(["section-change", "select", "clear-dictionary", "edit-mappings"]);
 
 const storageSections = STORAGE_SECTIONS;
 

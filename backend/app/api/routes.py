@@ -1,4 +1,7 @@
+from io import BytesIO
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -13,6 +16,7 @@ from app.schemas.analysis import (
     DatasetColumnMatchSummary,
     DatasetEntityMatchSummary,
     DatasetSummary,
+    DictionaryClearResponse,
     EntityReconcileRequest,
     EntityReconcileResponse,
     ForecastModelResponse,
@@ -36,6 +40,7 @@ from app.services.analysis import (
     build_analysis_response,
     build_dataset_detail,
     build_forecast_model_response,
+    build_forecast_contour_excel_bytes,
     build_forecast_predict_response,
     build_upload_response,
     dataset_to_summary,
@@ -57,6 +62,7 @@ from app.services.row_mapping import (
     save_manual_entity_matches,
 )
 from app.services.variable_mapping import (
+    clear_variable_dictionary,
     dictionary_snapshot,
     get_dataset_matches,
     reconcile_dataset_columns,
@@ -74,6 +80,11 @@ def get_llm_status():
 @router.get("/variables/dictionary", response_model=list[CanonicalVariableSummary])
 def get_variable_dictionary(db: Session = Depends(get_db)):
     return [CanonicalVariableSummary(**item) for item in dictionary_snapshot(db)]
+
+
+@router.delete("/variables/dictionary", response_model=DictionaryClearResponse)
+def reset_variable_dictionary(db: Session = Depends(get_db)):
+    return DictionaryClearResponse(**clear_variable_dictionary(db))
 
 
 @router.get("/entities/dictionary", response_model=list[CanonicalEntitySummary])
@@ -447,6 +458,42 @@ def predict_dataset_forecast(dataset_id: int, payload: ForecastPredictRequest, d
         contour_resolution=payload.contour_resolution,
         test_fraction=payload.test_fraction,
         random_seed=payload.random_seed,
+    )
+
+
+@router.post("/datasets/{dataset_id}/forecast/contour-export")
+def export_forecast_contour(dataset_id: int, payload: ForecastPredictRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset).options(selectinload(Dataset.records), selectinload(Dataset.trained_models)).where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    selected_model = None
+    if payload.model_id is not None:
+        selected_model = next((model for model in dataset.trained_models if model.id == payload.model_id), None)
+        if selected_model is None:
+            raise HTTPException(status_code=404, detail="Saved model not found.")
+
+    file_bytes = build_forecast_contour_excel_bytes(
+        dataset,
+        dataset.records,
+        payload.feature_columns,
+        model=selected_model,
+        x_feature=payload.x_feature,
+        y_feature=payload.y_feature,
+        slice_overrides=payload.slice_overrides,
+        test_fraction=payload.test_fraction,
+        random_seed=payload.random_seed,
+    )
+    if file_bytes is None:
+        raise HTTPException(status_code=400, detail="Contour export could not be built for the selected axes.")
+
+    filename = f"nomogram_dataset_{dataset.id}.xlsx"
+    return StreamingResponse(
+        BytesIO(file_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

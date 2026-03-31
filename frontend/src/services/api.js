@@ -94,6 +94,27 @@ export async function predictForecast(datasetId, payload) {
   return parseResponse(response);
 }
 
+export async function exportForecastContour(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/forecast/contour-export`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let detail = "Request failed";
+    try {
+      const data = await response.json();
+      detail = data.detail || detail;
+    } catch {
+      detail = response.statusText || detail;
+    }
+    throw new Error(detail);
+  }
+  return response.blob();
+}
+
 export async function fetchLLMStatus() {
   const response = await fetch(`${API_BASE_URL}/llm/status`);
   return parseResponse(response);
@@ -101,6 +122,13 @@ export async function fetchLLMStatus() {
 
 export async function fetchVariableDictionary() {
   const response = await fetch(`${API_BASE_URL}/variables/dictionary`);
+  return parseResponse(response);
+}
+
+export async function clearVariableDictionary() {
+  const response = await fetch(`${API_BASE_URL}/variables/dictionary`, {
+    method: "DELETE",
+  });
   return parseResponse(response);
 }
 

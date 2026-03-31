@@ -804,6 +804,46 @@ def build_forecast_contour(
     )
 
 
+def build_forecast_contour_excel_bytes(
+    dataset: Dataset,
+    records: list[Record],
+    requested_columns: list[str],
+    model: TrainedModel | None = None,
+    x_feature: str | None = None,
+    y_feature: str | None = None,
+    slice_overrides: dict[str, str | float | int | None] | None = None,
+    test_fraction: float = 0.2,
+    random_seed: int = 42,
+) -> bytes | None:
+    trained = (
+        load_saved_forecast_model(model, dataset, records)
+        if model is not None
+        else train_forecast_model(dataset, records, requested_columns, test_fraction=test_fraction, random_seed=random_seed)
+    )
+    if trained is None:
+        return None
+
+    contour = build_forecast_contour(
+        trained,
+        x_feature,
+        y_feature,
+        slice_overrides=slice_overrides,
+        contour_resolution=21,
+    )
+    if contour is None:
+        return None
+
+    table = pd.DataFrame(contour.z_values, index=contour.y_values, columns=contour.x_values)
+    table.index.name = contour.y_feature
+    table.columns.name = contour.x_feature
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        table.to_excel(writer, sheet_name="Nomogram")
+    output.seek(0)
+    return output.getvalue()
+
+
 def build_forecast_model_response(
     dataset: Dataset,
     records: list[Record],
