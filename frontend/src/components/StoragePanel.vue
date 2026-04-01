@@ -75,6 +75,7 @@ const STORAGE_SECTIONS = [
   { value: "fact_epu", label: "Факт ЭПУ" },
   { value: "plan_epu", label: "План ЭПУ" },
   { value: "production", label: "Добыча" },
+  { value: "svodprognoz", label: "Сводпрогноз" },
   { value: "plan_gtm", label: "ГТМ" },
   { value: "fact_krs", label: "Факт КРС" },
   { value: "plan_krs", label: "План КРС" },

@@ -3,15 +3,15 @@
     <div class="panel-header">
       <h2>Загрузка Excel</h2>
       <p>
-        После загрузки сервис сохранит таблицу и откроет окно распознавания заголовков:
-        сначала по словарю, а для спорных колонок можно включить LLaMA или задать соответствие вручную.
+        После загрузки сервис сохранит таблицу и откроет окно распознавания заголовков: сначала по словарю,
+        а для спорных колонок можно включить LLaMA или задать соответствие вручную.
       </p>
     </div>
 
     <form class="upload-form" @submit.prevent="handleSubmit">
       <label class="field">
         <span>Название набора</span>
-        <input v-model.trim="datasetName" type="text" placeholder="Например, Скважины март" required />
+        <input v-model.trim="datasetName" type="text" placeholder="Например, Сводпрогноз апрель" required />
       </label>
 
       <label class="field">
@@ -43,6 +43,7 @@ const STORAGE_SECTIONS = [
   { value: "fact_epu", label: "Факт ЭПУ" },
   { value: "plan_epu", label: "План ЭПУ" },
   { value: "production", label: "Добыча" },
+  { value: "svodprognoz", label: "Сводпрогноз" },
   { value: "plan_gtm", label: "ГТМ" },
   { value: "fact_krs", label: "Факт КРС" },
   { value: "plan_krs", label: "План КРС" },

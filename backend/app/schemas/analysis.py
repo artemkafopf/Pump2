@@ -247,6 +247,7 @@ class GeneratedReportSummary(BaseModel):
 
 
 class RepairForecastRequest(BaseModel):
+    source_dataset_id: int | None = None
     model_id: int | None = None
     base_failure_coefficient: float = 1.1
     nominal_gap_coefficient: float = -0.8
@@ -271,6 +272,12 @@ class RepairForecastRow(BaseModel):
     statuses: list[int]
 
 
+class RepairForecastMonthlySummary(BaseModel):
+    month: str
+    total_nno: float
+    failure_count: int
+
+
 class RepairForecastResponse(BaseModel):
     start_date: str
     end_date: str
@@ -278,5 +285,6 @@ class RepairForecastResponse(BaseModel):
     used_feature_columns: list[str]
     missing_feature_columns: list[str]
     source_datasets: list[RepairForecastSourceDataset]
+    monthly_summary: list[RepairForecastMonthlySummary] = []
     rows: list[RepairForecastRow]
     notes: list[str]

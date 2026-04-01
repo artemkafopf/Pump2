@@ -5,11 +5,11 @@ from datetime import date, datetime, timedelta
 from typing import Iterable
 
 import pandas as pd
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
-from app.db.models import Dataset, DatasetColumnMatch, Record, TrainedModel
+from app.db.models import Dataset, DatasetColumnMatch, TrainedModel
 from app.schemas.analysis import (
+    RepairForecastMonthlySummary,
     RepairForecastResponse,
     RepairForecastRow,
     RepairForecastSourceDataset,
@@ -23,26 +23,14 @@ from app.services.analysis import (
     train_forecast_model,
 )
 
-
-PRODUCTION_SECTIONS = ("production",)
-GTM_SECTIONS = ("gtm", "plan_gtm")
-
-FIELD_PATTERNS = ("месторожд", "field")
-LICENSE_PATTERNS = ("участ", "недр", "license", "area")
-CLUSTER_PATTERNS = ("куст", "cluster", "pad")
-WELL_PATTERNS = ("скваж", "well", "well id", "id скваж", "well_id")
+FIELD_PATTERNS = ("месторожд", "field", "field_name")
+CLUSTER_PATTERNS = ("куст", "cluster", "pad", "cluster_name")
+WELL_PATTERNS = ("скваж", "well", "well id", "well_id", "id скв", "well_name", "скв.№", "скв №")
+IDENTIFIER_PATTERNS = ("ун", "well_id", "well id", "id скв", "id well")
 NNO_PATTERNS = ("нно", "mtbf", "наработка на отказ", "mean time")
 RUNTIME_PATTERNS = ("наработ", "runtime", "отработ", "worked")
-DATE_PATTERNS = ("дата", "date")
-GTM_TYPE_PATTERNS = ("вид гтм", "тип гтм", "gtm", "мероприят")
-LIQUID_INCREMENT_PATTERNS = (
-    "прирост дебита жидкости",
-    "жидк",
-    "liquid",
-    "rate increase",
-)
-RATE_PATTERNS = ("дебит", "приемист", "закач", "rate", "режим")
-TRIGGER_GTM_TYPES = ("оптимизац", "пмд", "смена эцн")
+DATE_PATTERNS = ("дата", "date", "day", "period")
+LIQUID_RATE_PATTERNS = ("дебж", "дебит жид", "liq", "liquid")
 
 
 @dataclass
@@ -53,18 +41,14 @@ class PreparedDataset:
 
 
 def normalize_text(value: object) -> str:
-    return str(value or "").strip().casefold()
+    return str(value or "").strip().casefold().replace("ё", "е")
 
 
 def find_best_column(columns: Iterable[str], patterns: tuple[str, ...]) -> str | None:
-    columns = list(columns)
     scored: list[tuple[int, str]] = []
     for column in columns:
         normalized = normalize_text(column)
-        score = 0
-        for pattern in patterns:
-            if pattern in normalized:
-                score += len(pattern)
+        score = sum(len(pattern) for pattern in patterns if pattern in normalized)
         if score:
             scored.append((score, column))
     if not scored:
@@ -83,12 +67,13 @@ def parse_date(value: object) -> date | None:
 
     numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
     if pd.notna(numeric):
-        if 20000 <= float(numeric) <= 80000:
-            parsed = pd.to_datetime(float(numeric), errors="coerce", unit="D", origin="1899-12-30")
+        numeric_value = float(numeric)
+        if 20000 <= numeric_value <= 80000:
+            parsed = pd.to_datetime(numeric_value, errors="coerce", unit="D", origin="1899-12-30")
             if pd.notna(parsed):
                 return parsed.date()
-        if 1900 <= float(numeric) <= 2500 and float(numeric).is_integer():
-            return date(int(numeric), 1, 1)
+        if 1900 <= numeric_value <= 2500 and numeric_value.is_integer():
+            return date(int(numeric_value), 1, 1)
 
     parsed = pd.to_datetime(pd.Series([value], dtype="object"), errors="coerce", dayfirst=True).iloc[0]
     if pd.notna(parsed):
@@ -111,11 +96,7 @@ def stringify(value: object) -> str | None:
 
 
 def build_canonical_map(matches: list[DatasetColumnMatch]) -> dict[str, str]:
-    return {
-        item.source_column: item.canonical_name
-        for item in matches
-        if item.canonical_name
-    }
+    return {item.source_column: item.canonical_name for item in matches if item.canonical_name}
 
 
 def canonicalize_row(row: dict, canonical_map: dict[str, str]) -> dict:
@@ -133,19 +114,10 @@ def prepare_dataset(dataset: Dataset) -> PreparedDataset:
     return PreparedDataset(dataset=dataset, rows=prepared_rows, canonical_map=canonical_map)
 
 
-def get_latest_dataset_by_sections(db: Session, sections: tuple[str, ...]) -> Dataset | None:
-    return db.scalar(
-        select(Dataset)
-        .options(selectinload(Dataset.records), selectinload(Dataset.column_matches))
-        .where(Dataset.storage_section.in_(sections))
-        .order_by(Dataset.storage_version.desc(), Dataset.created_at.desc(), Dataset.id.desc())
-    )
-
-
 def resolve_model_bundle(
     dataset: Dataset,
     model_id: int | None,
-    base_failure_feature_columns: list[str],
+    base_feature_columns: list[str],
 ) -> tuple[dict | None, TrainedModel | None]:
     selected_model = None
     if model_id is not None:
@@ -158,7 +130,7 @@ def resolve_model_bundle(
         if loaded is not None:
             return loaded, selected_model
 
-    trained = train_forecast_model(dataset, dataset.records, base_failure_feature_columns)
+    trained = train_forecast_model(dataset, dataset.records, base_feature_columns)
     return trained, selected_model
 
 
@@ -166,51 +138,76 @@ def identify_key_columns(rows: list[dict]) -> dict[str, str | None]:
     columns = list({column for row in rows for column in row.keys()})
     return {
         "field": find_best_column(columns, FIELD_PATTERNS),
-        "license": find_best_column(columns, LICENSE_PATTERNS),
         "cluster": find_best_column(columns, CLUSTER_PATTERNS),
         "well": find_best_column(columns, WELL_PATTERNS),
+        "identifier": find_best_column(columns, IDENTIFIER_PATTERNS),
         "nno": find_best_column(columns, NNO_PATTERNS),
         "runtime": find_best_column(columns, RUNTIME_PATTERNS),
         "date": find_best_column(columns, DATE_PATTERNS),
-        "gtm_type": find_best_column(columns, GTM_TYPE_PATTERNS),
-        "liquid_increment": find_best_column(columns, LIQUID_INCREMENT_PATTERNS),
+        "liquid_rate": find_best_column(columns, LIQUID_RATE_PATTERNS),
     }
 
 
-def build_well_key(row: dict, key_columns: dict[str, str | None]) -> tuple[str, str, str, str]:
-    return (
-        normalize_text(row.get(key_columns["field"])) if key_columns.get("field") else "",
-        normalize_text(row.get(key_columns["license"])) if key_columns.get("license") else "",
-        normalize_text(row.get(key_columns["cluster"])) if key_columns.get("cluster") else "",
-        normalize_text(row.get(key_columns["well"])) if key_columns.get("well") else "",
-    )
+def build_lookup_keys(row: dict, key_columns: dict[str, str | None]) -> list[tuple[str, ...]]:
+    keys: list[tuple[str, ...]] = []
+
+    identifier_column = key_columns.get("identifier")
+    if identifier_column:
+        identifier = normalize_text(row.get(identifier_column))
+        if identifier:
+            keys.append(("identifier", identifier))
+
+    well = normalize_text(row.get(key_columns["well"])) if key_columns.get("well") else ""
+    cluster = normalize_text(row.get(key_columns["cluster"])) if key_columns.get("cluster") else ""
+
+    if well and cluster:
+        keys.append(("well_cluster", well, cluster))
+    if well:
+        keys.append(("well", well))
+
+    return keys
 
 
-def best_latest_rows(rows: list[dict], key_columns: dict[str, str | None]) -> dict[tuple[str, str, str, str], dict]:
-    dated_rows: dict[tuple[str, str, str, str], tuple[date | None, int, dict]] = {}
+def primary_group_key(row: dict, key_columns: dict[str, str | None]) -> tuple[str, ...]:
+    keys = build_lookup_keys(row, key_columns)
+    if keys:
+        return keys[0]
+    return ("row", normalize_text(row))
+
+
+def best_latest_rows(rows: list[dict], key_columns: dict[str, str | None]) -> dict[tuple[str, ...], dict]:
+    dated_rows: dict[tuple[str, ...], tuple[date | None, int, dict]] = {}
     for index, row in enumerate(rows):
-        key = build_well_key(row, key_columns)
         row_date = parse_date(row.get(key_columns["date"])) if key_columns.get("date") else None
-        previous = dated_rows.get(key)
-        if previous is None or ((row_date or date.min), index) >= ((previous[0] or date.min), previous[1]):
-            dated_rows[key] = (row_date, index, row)
+        for key in build_lookup_keys(row, key_columns):
+            previous = dated_rows.get(key)
+            if previous is None or ((row_date or date.min), index) >= ((previous[0] or date.min), previous[1]):
+                dated_rows[key] = (row_date, index, row)
     return {key: item[2] for key, item in dated_rows.items()}
 
 
-def build_section_numeric_stats(
-    rows: list[dict],
-    key_columns: dict[str, str | None],
-    feature_columns: list[str],
-) -> dict[str, dict[str, float]]:
-    license_column = key_columns.get("license")
-    if not license_column:
+def find_matching_fact_row(
+    source_row: dict,
+    source_keys: dict[str, str | None],
+    fact_latest_by_key: dict[tuple[str, ...], dict],
+) -> dict | None:
+    for key in build_lookup_keys(source_row, source_keys):
+        if key in fact_latest_by_key:
+            return fact_latest_by_key[key]
+    return None
+
+
+def build_identifier_stats(rows: list[dict], key_columns: dict[str, str | None], feature_columns: list[str]) -> dict[str, dict[str, float]]:
+    identifier_column = key_columns.get("identifier")
+    if not identifier_column:
         return {}
+
     frame = pd.DataFrame(rows)
-    if frame.empty or license_column not in frame.columns:
+    if frame.empty or identifier_column not in frame.columns:
         return {}
 
     stats: dict[str, dict[str, float]] = {}
-    for license_value, group in frame.groupby(license_column, dropna=True):
+    for identifier_value, group in frame.groupby(identifier_column, dropna=True):
         metrics: dict[str, float] = {}
         for column in feature_columns:
             if column not in group.columns:
@@ -218,7 +215,7 @@ def build_section_numeric_stats(
             numeric = coerce_numeric_series(group[column])
             if numeric.notna().any():
                 metrics[column] = float(numeric.mean())
-        stats[normalize_text(license_value)] = metrics
+        stats[normalize_text(identifier_value)] = metrics
     return stats
 
 
@@ -226,14 +223,15 @@ def apply_feature_defaults(
     row: dict,
     feature_columns: list[str],
     fact_row: dict | None,
-    section_stats: dict[str, dict[str, float]],
+    identifier_stats: dict[str, dict[str, float]],
     key_columns: dict[str, str | None],
     manual_values: dict[str, object],
     baseline_values: dict[str, object],
 ) -> dict:
     prepared = dict(row)
-    section_key = normalize_text(prepared.get(key_columns["license"])) if key_columns.get("license") else ""
-    section_defaults = section_stats.get(section_key, {})
+    identifier_key = normalize_text(prepared.get(key_columns["identifier"])) if key_columns.get("identifier") else ""
+    identifier_defaults = identifier_stats.get(identifier_key, {})
+
     for column in feature_columns:
         value = prepared.get(column)
         if value not in (None, ""):
@@ -242,34 +240,18 @@ def apply_feature_defaults(
             prepared[column] = manual_values[column]
         elif fact_row and fact_row.get(column) not in (None, ""):
             prepared[column] = fact_row.get(column)
-        elif column in section_defaults:
-            prepared[column] = section_defaults[column]
+        elif column in identifier_defaults:
+            prepared[column] = identifier_defaults[column]
         else:
             prepared[column] = baseline_values.get(column)
     return prepared
 
 
-def update_gtm_features(
-    row: dict,
-    gtm_row: dict,
-    feature_columns: list[str],
-    liquid_increment_column: str | None,
-    nominal_gap_coefficient: float,
-) -> dict:
-    prepared = dict(row)
-    increment = to_float(gtm_row.get(liquid_increment_column)) if liquid_increment_column else None
-    for column in feature_columns:
-        normalized = normalize_text(column)
-        current_value = to_float(prepared.get(column))
-        if increment is not None and current_value is not None and any(token in normalized for token in RATE_PATTERNS):
-            prepared[column] = current_value + increment
-        elif current_value is not None and any(token in normalized for token in RATE_PATTERNS):
-            prepared[column] = current_value * (1 - nominal_gap_coefficient)
-    return prepared
-
-
 def predict_single_row(trained: dict, row: dict) -> float | None:
-    return predict_forecast_rows(trained, [row])[0]
+    prediction = predict_forecast_rows(trained, [row])
+    if not prediction or prediction[0] is None:
+        return None
+    return max(float(prediction[0]), 5.0)
 
 
 def calculate_first_failure_offset(
@@ -287,52 +269,93 @@ def calculate_first_failure_offset(
     return max(int(round(predicted_nno * base_failure_coefficient)), 1)
 
 
-def build_period_statuses(
-    dates: list[date],
-    start_at: date,
-    stop_before: date,
-    predicted_nno: float | None,
+def align_to_forecast_date(target: date, forecast_dates: list[date]) -> date | None:
+    for item in forecast_dates:
+        if item >= target:
+            return item
+    return None
+
+
+def prediction_for_date(predictions: list[tuple[date, float | None]], target_date: date) -> float | None:
+    current = None
+    for row_date, prediction in predictions:
+        if row_date <= target_date:
+            current = prediction
+        else:
+            break
+    if current is not None:
+        return current
+    return predictions[0][1] if predictions else None
+
+
+def build_statuses_for_well(
+    forecast_dates: list[date],
+    prediction_series: list[tuple[date, float | None]],
     actual_nno: float | None,
     runtime_days: float | None,
     base_failure_coefficient: float,
-) -> list[tuple[date, int]]:
-    if predicted_nno is None:
-        return []
+) -> tuple[list[int], list[str], list[tuple[date, float]]]:
+    if not forecast_dates:
+        return [], [], []
 
-    events: list[tuple[date, int]] = []
-    interval_days = max(int(round(predicted_nno)), 1)
-    next_failure = start_at + timedelta(
+    statuses = [1] * len(forecast_dates)
+    if not prediction_series:
+        return statuses, [], []
+
+    first_prediction = prediction_series[0][1]
+    if first_prediction is None:
+        return statuses, [], []
+
+    event_dates: list[str] = []
+    event_nnos: list[tuple[date, float]] = []
+    date_index = {item: index for index, item in enumerate(forecast_dates)}
+    current_anchor = forecast_dates[0]
+    next_failure = current_anchor + timedelta(
         days=calculate_first_failure_offset(
-            predicted_nno,
+            first_prediction,
             actual_nno,
             runtime_days,
             base_failure_coefficient,
         )
     )
-    while next_failure < stop_before and next_failure <= dates[-1]:
-        events.append((next_failure, 0))
-        next_failure = next_failure + timedelta(days=interval_days)
+
+    while next_failure <= forecast_dates[-1]:
+        aligned = align_to_forecast_date(next_failure, forecast_dates)
+        if aligned is None:
+            break
+
+        index = date_index[aligned]
+        statuses[index] = 0
+        event_dates.append(aligned.isoformat())
+
+        next_prediction = prediction_for_date(prediction_series, aligned)
+        if next_prediction is None:
+            break
+        event_nnos.append((aligned, next_prediction))
+
+        current_anchor = aligned
+        next_failure = current_anchor + timedelta(days=max(int(round(next_prediction)), 1))
         actual_nno = None
         runtime_days = None
-    return events
+
+    return statuses, event_dates, event_nnos
 
 
 def build_repair_forecast(
     db: Session,
     fact_dataset: Dataset,
+    source_dataset: Dataset,
     model_id: int | None,
     base_failure_coefficient: float,
     nominal_gap_coefficient: float,
     manual_feature_values: dict[str, object],
 ) -> RepairForecastResponse:
-    production_dataset = get_latest_dataset_by_sections(db, PRODUCTION_SECTIONS)
-    gtm_dataset = get_latest_dataset_by_sections(db, GTM_SECTIONS)
-    if production_dataset is None:
-        raise ValueError("Для расчета нужен датасет в разделе 'Добыча'.")
+    del db, nominal_gap_coefficient
 
     fact_prepared = prepare_dataset(fact_dataset)
-    production_prepared = prepare_dataset(production_dataset)
-    gtm_prepared = prepare_dataset(gtm_dataset) if gtm_dataset is not None else None
+    source_prepared = prepare_dataset(source_dataset)
+    if not source_prepared.rows:
+        raise ValueError("В сводпрогнозе нет строк для расчета.")
 
     feature_columns = resolve_forecast_columns(
         fact_dataset,
@@ -343,193 +366,151 @@ def build_repair_forecast(
     if trained is None:
         raise ValueError("Не удалось подготовить модель CatBoost для прогноза ремонтов.")
 
+    fact_keys = identify_key_columns(fact_prepared.rows)
+    source_keys = identify_key_columns(source_prepared.rows)
+    date_column = source_keys.get("date")
+    liquid_rate_column = source_keys.get("liquid_rate")
+    identifier_column = source_keys.get("identifier")
+    well_column = source_keys.get("well")
+
+    if not date_column:
+        raise ValueError("В сводпрогнозе не найдена колонка с датой.")
+    if not identifier_column:
+        raise ValueError("В сводпрогнозе не найдена колонка УН.")
+    if not well_column:
+        raise ValueError("В сводпрогнозе не найдена колонка со скважиной.")
+
+    source_rows_with_dates: list[tuple[date, dict]] = []
+    for row in source_prepared.rows:
+        row_date = parse_date(row.get(date_column))
+        if row_date is not None:
+            source_rows_with_dates.append((row_date, row))
+    if not source_rows_with_dates:
+        raise ValueError("В сводпрогнозе не удалось распознать даты для расчета.")
+
+    source_rows_with_dates.sort(key=lambda item: item[0])
     today = date.today()
     end_date = date(today.year + 1, 12, 31)
-    dates = [today + timedelta(days=offset) for offset in range((end_date - today).days + 1)]
+    forecast_dates = [today + timedelta(days=offset) for offset in range((end_date - today).days + 1)]
 
-    fact_keys = identify_key_columns(fact_prepared.rows)
-    production_keys = identify_key_columns(production_prepared.rows)
-    gtm_keys = identify_key_columns(gtm_prepared.rows if gtm_prepared else [])
+    fact_latest_by_key = best_latest_rows(fact_prepared.rows, fact_keys)
+    identifier_stats = build_identifier_stats(fact_prepared.rows, fact_keys, trained["feature_columns"])
 
-    fact_latest_by_well = best_latest_rows(fact_prepared.rows, fact_keys)
-    production_latest_by_well = best_latest_rows(production_prepared.rows, production_keys)
-    section_stats = build_section_numeric_stats(fact_prepared.rows, fact_keys, trained["feature_columns"])
+    available_columns = {column for row in source_prepared.rows for column in row.keys()}
+    missing_feature_columns = [column for column in trained["feature_columns"] if column not in available_columns]
 
-    missing_feature_columns = [
-        column for column in trained["feature_columns"]
-        if column not in {key for row in production_prepared.rows for key in row.keys()}
-    ]
+    wells: dict[tuple[str, ...], list[tuple[date, dict]]] = {}
+    for row_date, row in source_rows_with_dates:
+        wells.setdefault(primary_group_key(row, source_keys), []).append((row_date, row))
 
-    gtm_by_well: dict[tuple[str, str, str, str], list[dict]] = {}
-    if gtm_prepared is not None:
-        for row in gtm_prepared.rows:
-            key = build_well_key(row, gtm_keys)
-            gtm_by_well.setdefault(key, []).append(row)
-        if gtm_keys.get("date"):
-            for key, items in gtm_by_well.items():
-                gtm_by_well[key] = sorted(
-                    items,
-                    key=lambda item: parse_date(item.get(gtm_keys["date"])) or today,
-                )
-
-    all_keys = set(production_latest_by_well) | set(gtm_by_well)
-    category_order = {"БАЗА": 0, "ГТМ БАЗА": 1, "ГТМ Развитие": 2}
     result_rows: list[RepairForecastRow] = []
     notes: list[str] = []
+    monthly_summary_map: dict[str, dict[str, float | int]] = {}
 
-    for key in sorted(all_keys):
-        production_row = production_latest_by_well.get(key)
-        fact_row = fact_latest_by_well.get(key)
-        gtm_events = gtm_by_well.get(key, [])
+    for _, items in sorted(wells.items(), key=lambda item: item[0]):
+        first_row = items[0][1]
+        fact_row = find_matching_fact_row(first_row, source_keys, fact_latest_by_key)
+        prediction_series: list[tuple[date, float | None]] = []
+        actual_nno = None
+        runtime_days = None
 
-        if production_row is not None and gtm_events:
-            category = "ГТМ БАЗА"
-        elif production_row is not None:
-            category = "БАЗА"
-        else:
-            category = "ГТМ Развитие"
-
-        base_row = dict(production_row or (gtm_events[0] if gtm_events else {}))
-        if category == "БАЗА":
-            base_row["категория фонда"] = "БАЗА"
-        elif category == "ГТМ БАЗА":
-            base_row["категория фонда"] = "ГТМ БАЗА"
-        else:
-            base_row["категория фонда"] = "ГТМ Развитие"
-
-        base_row = apply_feature_defaults(
-            base_row,
-            trained["feature_columns"],
-            fact_row,
-            section_stats,
-            production_keys if production_row is not None else gtm_keys,
-            manual_feature_values,
-            trained["baseline_values"],
-        )
-
-        current_predicted_nno = predict_single_row(trained, base_row)
-        actual_nno = to_float(base_row.get(production_keys.get("nno"))) if production_keys.get("nno") else None
-        runtime_days = to_float(base_row.get(production_keys.get("runtime"))) if production_keys.get("runtime") else None
-        statuses = [1] * len(dates)
-        event_dates: list[str] = []
-        segment_start = today
-
-        event_boundaries: list[tuple[date, dict]] = []
-        for gtm_row in gtm_events:
-            event_date = parse_date(gtm_row.get(gtm_keys.get("date"))) if gtm_keys.get("date") else None
-            if event_date is not None:
-                event_boundaries.append((event_date, gtm_row))
-
-        event_boundaries.sort(key=lambda item: item[0])
-        for event_date, gtm_row in event_boundaries:
-            if event_date > end_date:
-                continue
-            stop_before = event_date
-            for failure_date, code in build_period_statuses(
-                dates,
-                segment_start,
-                stop_before,
-                current_predicted_nno,
-                actual_nno,
-                runtime_days,
-                base_failure_coefficient,
-            ):
-                if failure_date in dates:
-                    statuses[(failure_date - today).days] = code
-
-            gtm_type_value = stringify(gtm_row.get(gtm_keys.get("gtm_type"))) if gtm_keys.get("gtm_type") else None
-            if gtm_type_value and any(token in normalize_text(gtm_type_value) for token in TRIGGER_GTM_TYPES):
-                statuses[(event_date - today).days] = 2
-            event_dates.append(event_date.isoformat())
-
-            base_row = update_gtm_features(
-                base_row,
-                gtm_row,
-                trained["feature_columns"],
-                gtm_keys.get("liquid_increment"),
-                nominal_gap_coefficient,
-            )
-            base_row = apply_feature_defaults(
-                base_row,
+        for row_date, source_row in items:
+            prepared_row = apply_feature_defaults(
+                source_row,
                 trained["feature_columns"],
                 fact_row,
-                section_stats,
-                production_keys if production_row is not None else gtm_keys,
+                identifier_stats,
+                source_keys,
                 manual_feature_values,
                 trained["baseline_values"],
             )
-            current_predicted_nno = predict_single_row(trained, base_row)
-            actual_nno = None
-            runtime_days = None
-            segment_start = event_date
+            prediction_series.append((row_date, predict_single_row(trained, prepared_row)))
 
-        for failure_date, code in build_period_statuses(
-            dates,
-            segment_start,
-            end_date + timedelta(days=1),
-            current_predicted_nno,
+            if actual_nno is None and source_keys.get("nno"):
+                actual_nno = to_float(prepared_row.get(source_keys["nno"]))
+            if runtime_days is None and source_keys.get("runtime"):
+                runtime_days = to_float(prepared_row.get(source_keys["runtime"]))
+
+        if actual_nno is None and fact_row and fact_keys.get("nno"):
+            actual_nno = to_float(fact_row.get(fact_keys["nno"]))
+        if runtime_days is None and fact_row and fact_keys.get("runtime"):
+            runtime_days = to_float(fact_row.get(fact_keys["runtime"]))
+
+        statuses, event_dates, event_nnos = build_statuses_for_well(
+            forecast_dates,
+            prediction_series,
             actual_nno,
             runtime_days,
             base_failure_coefficient,
-        ):
-            if failure_date in dates:
-                statuses[(failure_date - today).days] = code
-
-        keys_source = production_keys if production_row is not None else gtm_keys
-        field_name = stringify(base_row.get(keys_source.get("field"))) if keys_source.get("field") else None
-        license_area = stringify(base_row.get(keys_source.get("license"))) if keys_source.get("license") else None
-        cluster_name = stringify(base_row.get(keys_source.get("cluster"))) if keys_source.get("cluster") else None
-        well_name = (
-            stringify(base_row.get(keys_source.get("well")))
-            or "Неизвестная скважина"
         )
+
+        for event_date, event_nno in event_nnos:
+            month_key = f"{event_date.year}-{event_date.month:02d}"
+            bucket = monthly_summary_map.setdefault(month_key, {"total_nno": 0.0, "failure_count": 0})
+            bucket["total_nno"] = float(bucket["total_nno"]) + float(event_nno)
+            bucket["failure_count"] = int(bucket["failure_count"]) + 1
+
+        predicted_values = [value for _, value in prediction_series if value is not None]
+        average_prediction = float(sum(predicted_values) / len(predicted_values)) if predicted_values else None
+
+        first_liquid_rate = to_float(first_row.get(liquid_rate_column)) if liquid_rate_column else None
+        category = "База" if first_liquid_rate is not None and first_liquid_rate > 0 else "ВНС"
 
         result_rows.append(
             RepairForecastRow(
                 category=category,
-                field_name=field_name,
-                license_area=license_area,
-                cluster_name=cluster_name,
-                well_name=well_name,
-                predicted_nno=current_predicted_nno,
-                actual_nno=to_float(base_row.get(production_keys.get("nno"))) if production_keys.get("nno") else None,
-                runtime_days=to_float(base_row.get(production_keys.get("runtime"))) if production_keys.get("runtime") else None,
+                field_name=stringify(first_row.get(source_keys["field"])) if source_keys.get("field") else None,
+                license_area=stringify(first_row.get(identifier_column)),
+                cluster_name=stringify(first_row.get(source_keys["cluster"])) if source_keys.get("cluster") else None,
+                well_name=stringify(first_row.get(well_column)) or "Неизвестная скважина",
+                predicted_nno=average_prediction,
+                actual_nno=actual_nno,
+                runtime_days=runtime_days,
                 event_dates=event_dates,
                 statuses=statuses,
             )
         )
 
     if selected_model is None:
-        notes.append("Сохраненная модель не была выбрана, использована текущая обучаемая конфигурация CatBoost.")
-    if gtm_dataset is None:
-        notes.append("Датасет ГТМ не найден. Для расчета использована только категория БАЗА.")
+        notes.append("Сохраненная модель не выбрана, используется текущая конфигурация CatBoost.")
     if missing_feature_columns:
-        notes.append("Часть признаков модели не была найдена в наборе Добыча и была заполнена из Факт ЭПУ, статистики по участку недр или базовых значений модели.")
+        notes.append(
+            "Часть признаков модели отсутствовала в сводпрогнозе и была заполнена из Факт ЭПУ, средними значениями по УН, вручную или базовыми значениями модели."
+        )
+    if not monthly_summary_map:
+        notes.append("В расчетном горизонте не возникло прогнозных отказов, поэтому месячная диаграмма показывает ноль.")
 
     result_rows.sort(
         key=lambda item: (
-            category_order.get(item.category, 99),
-            item.field_name or "",
+            item.category,
             item.license_area or "",
             item.cluster_name or "",
             item.well_name,
         )
     )
 
+    monthly_summary = [
+        RepairForecastMonthlySummary(
+            month=month,
+            total_nno=round(float(values["total_nno"]), 1),
+            failure_count=int(values["failure_count"]),
+        )
+        for month, values in sorted(monthly_summary_map.items())
+    ]
+
     return RepairForecastResponse(
         start_date=today.isoformat(),
         end_date=end_date.isoformat(),
-        dates=[item.isoformat() for item in dates],
+        dates=[item.isoformat() for item in forecast_dates],
         used_feature_columns=list(trained["feature_columns"]),
         missing_feature_columns=missing_feature_columns,
         source_datasets=[
-            RepairForecastSourceDataset(label="Факт ЭПУ", dataset=build_dataset_detail(fact_dataset, fact_dataset.records).dataset),
-            RepairForecastSourceDataset(label="Добыча", dataset=build_dataset_detail(production_dataset, production_dataset.records).dataset),
             RepairForecastSourceDataset(
-                label="ГТМ",
-                dataset=build_dataset_detail(gtm_dataset, gtm_dataset.records).dataset if gtm_dataset is not None else None,
-            ),
+                label="Сводпрогноз",
+                dataset=build_dataset_detail(source_dataset, source_dataset.records).dataset,
+            )
         ],
+        monthly_summary=monthly_summary,
         rows=result_rows,
         notes=notes,
     )

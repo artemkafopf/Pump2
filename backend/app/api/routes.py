@@ -506,6 +506,16 @@ def calculate_repair_forecast(dataset_id: int, payload: RepairForecastRequest, d
     )
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found.")
+    if payload.source_dataset_id is None:
+        raise HTTPException(status_code=400, detail="Source dataset id is required for repair forecast.")
+
+    source_dataset = db.scalar(
+        select(Dataset)
+        .options(selectinload(Dataset.records), selectinload(Dataset.column_matches))
+        .where(Dataset.id == payload.source_dataset_id)
+    )
+    if source_dataset is None:
+        raise HTTPException(status_code=404, detail="Source dataset not found.")
     if dataset.storage_section != "fact_epu":
         raise HTTPException(status_code=400, detail="Repair forecast can only be calculated from the 'Факт ЭПУ' dataset.")
 
@@ -513,6 +523,7 @@ def calculate_repair_forecast(dataset_id: int, payload: RepairForecastRequest, d
         return build_repair_forecast(
             db,
             dataset,
+            source_dataset,
             model_id=payload.model_id,
             base_failure_coefficient=payload.base_failure_coefficient,
             nominal_gap_coefficient=payload.nominal_gap_coefficient,

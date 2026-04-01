@@ -62,7 +62,7 @@
               @click="activeModule = 'repairForecast'"
             >
               <span class="dataset-name">Прогноз ремонтов</span>
-              <span class="dataset-meta">Факт ЭПУ + Добыча + ГТМ, посуточная матрица отказов</span>
+              <span class="dataset-meta">Текущая модель CatBoost + выбранный сводпрогноз из хранения данных</span>
             </button>
           </div>
         </section>
@@ -311,7 +311,8 @@
 
           <RepairForecastModule
             v-else-if="activeModule === 'repairForecast' && factDataset"
-            :dataset="factDataset.dataset"
+            :model-dataset="factDataset.dataset"
+            :source-dataset="repairSourceDataset"
           />
         </template>
 
@@ -355,6 +356,7 @@ import {
 } from "./services/api";
 
 const FACT_EPU_SECTION = "fact_epu";
+const SVODPROGNOZ_SECTION = "svodprognoz";
 
 const datasets = ref([]);
 const storageDatasetId = ref(null);
@@ -383,6 +385,17 @@ const mappingDialog = ref({
 
 const displayDataset = computed(() => (activeModule.value === "storage" ? storageDataset.value : factDataset.value));
 const displayAnalysis = computed(() => (activeModule.value === "storage" ? storageAnalysis.value : factAnalysis.value));
+const latestSvodprognozDataset = computed(() =>
+  datasets.value
+    .filter((dataset) => dataset.storage_section === SVODPROGNOZ_SECTION)
+    .slice()
+    .sort((a, b) => b.storage_version - a.storage_version)[0] || null,
+);
+const repairSourceDataset = computed(() =>
+  storageDataset.value?.dataset?.storage_section === SVODPROGNOZ_SECTION
+    ? storageDataset.value.dataset
+    : latestSvodprognozDataset.value,
+);
 
 function getLatestDatasetIdBySection(section) {
   return datasets.value

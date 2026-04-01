@@ -167,6 +167,75 @@ a {
   gap: 24px;
 }
 
+.prediction-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.prediction-grid .panel {
+  overflow: hidden;
+}
+
+.prediction-grid .panel-header {
+  align-items: flex-start;
+}
+
+.prediction-grid .panel-header > div {
+  min-width: 0;
+}
+
+.prediction-grid .control-block {
+  gap: 18px;
+}
+
+.prediction-grid .control-group,
+.prediction-grid .feature-slot-grid,
+.prediction-grid .range-grid,
+.prediction-grid .prediction-actions {
+  min-width: 0;
+}
+
+.prediction-grid .button-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.prediction-grid .choice-button,
+.prediction-grid .file-button,
+.prediction-grid .primary-button,
+.prediction-grid .note-chip {
+  width: 100%;
+}
+
+.prediction-grid .choice-button,
+.prediction-grid .file-button,
+.prediction-grid .primary-button {
+  min-height: 44px;
+  justify-content: center;
+}
+
+.prediction-grid .note-chip {
+  justify-content: center;
+  white-space: normal;
+  text-align: center;
+}
+
+.prediction-grid .feature-slot-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.prediction-grid .range-grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.prediction-grid .prediction-actions {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.prediction-grid .plotly-chart {
+  min-height: 360px;
+}
+
 .dashboard-grid {
   grid-template-columns: repeat(12, minmax(0, 1fr));
 }
@@ -821,6 +890,20 @@ input[type="range"]::-moz-range-thumb {
   .prediction-actions {
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   }
+
+  .prediction-grid .panel {
+    padding: 20px;
+  }
+
+  .prediction-grid .feature-slot-grid,
+  .prediction-grid .range-grid,
+  .prediction-grid .prediction-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .prediction-grid .button-group {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 720px) {
@@ -871,11 +954,52 @@ input[type="range"]::-moz-range-thumb {
   .logo-image {
     max-width: 240px;
   }
+
+  .prediction-grid .panel-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .prediction-grid .feature-slot-grid,
+  .prediction-grid .range-grid,
+  .prediction-grid .prediction-actions,
+  .prediction-grid .button-group {
+    grid-template-columns: 1fr;
+  }
+
+  .prediction-grid .plotly-chart {
+    min-height: 300px;
+  }
 }
 
 .repair-forecast-grid {
   display: grid;
   gap: 20px;
+}
+
+.repair-forecast-grid .panel {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.repair-forecast-grid .panel-header > div,
+.repair-forecast-grid .control-block,
+.repair-forecast-grid .control-group,
+.repair-forecast-grid .feature-slot-grid,
+.repair-forecast-grid .prediction-actions {
+  min-width: 0;
+}
+
+.repair-forecast-grid .feature-slot-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.repair-forecast-grid .prediction-actions {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.repair-forecast-grid .plotly-chart {
+  min-height: 340px;
 }
 
 .table-wrap-top-scroll {
@@ -946,12 +1070,28 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .repair-table-viewport {
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
 }
 
 .repair-table-content {
   width: max-content;
-  will-change: transform;
+  min-width: 100%;
+}
+
+.repair-table-viewport::-webkit-scrollbar {
+  height: 12px;
+}
+
+.repair-table-viewport::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+}
+
+.repair-table-viewport::-webkit-scrollbar-thumb {
+  background: rgba(96, 165, 250, 0.55);
+  border-radius: 999px;
 }
 
 .repair-date-column {
@@ -994,6 +1134,35 @@ input[type="range"]::-moz-range-thumb {
   color: #c7d2fe;
 }
 
+.repair-hierarchy-row {
+  cursor: pointer;
+}
+
+.repair-row-group td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.repair-row-selected td {
+  background: rgba(96, 165, 250, 0.12) !important;
+}
+
+.repair-tree-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.repair-tree-toggle {
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+  line-height: 1;
+}
+
 .note-list {
   display: grid;
   gap: 10px;
@@ -1007,4 +1176,86 @@ input[type="range"]::-moz-range-thumb {
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.03);
   color: var(--text-secondary);
+}
+
+@media (max-width: 1024px) {
+  .repair-forecast-grid .panel {
+    padding: 20px;
+  }
+
+  .repair-forecast-grid .feature-slot-grid,
+  .repair-forecast-grid .prediction-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .repair-scrollbar-bar {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .repair-scrollbar-label {
+    white-space: normal;
+  }
+
+  .repair-table th,
+  .repair-table td {
+    padding: 10px 12px;
+  }
+
+  .repair-table-viewport {
+    max-width: calc(100vw - 72px);
+  }
+}
+
+@media (max-width: 720px) {
+  .repair-forecast-grid {
+    gap: 16px;
+  }
+
+  .repair-forecast-grid .panel-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .repair-forecast-grid .overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .repair-forecast-grid .button-group,
+  .repair-forecast-grid .prediction-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .repair-forecast-grid .choice-button,
+  .repair-forecast-grid .file-button,
+  .repair-forecast-grid .primary-button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .repair-forecast-grid .plotly-chart {
+    min-height: 280px;
+  }
+
+  .repair-scrollbar-bar {
+    padding: 10px 12px;
+  }
+
+  .repair-table-viewport {
+    max-width: calc(100vw - 48px);
+  }
+
+  .repair-date-column {
+    width: 24px;
+    min-width: 24px;
+    max-width: 24px;
+    padding: 4px 2px !important;
+    font-size: 10px;
+  }
+
+  .repair-status-cell {
+    width: 22px;
+    min-width: 22px;
+    font-size: 10px;
+  }
 }
