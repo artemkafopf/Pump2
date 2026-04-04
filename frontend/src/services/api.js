@@ -217,3 +217,40 @@ export async function calculateRepairForecast(datasetId, payload) {
   });
   return parseResponse(response);
 }
+
+export async function previewRepairForecastTail(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/repair-forecast/tail-preview`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
+export async function listRepairForecastCalculations(datasetId) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/repair-forecast/calculations`);
+  return parseResponse(response);
+}
+
+export async function fetchLatestRepairForecastCalculation(datasetId) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/repair-forecast/calculations/latest`);
+  return parseResponse(response);
+}
+
+export async function fetchRepairForecastCalculation(datasetId, calculationId) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/repair-forecast/calculations/${calculationId}`);
+  return parseResponse(response);
+}
+
+export async function saveRepairForecastCalculation(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/repair-forecast/calculations`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}

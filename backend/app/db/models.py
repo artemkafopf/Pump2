@@ -49,6 +49,12 @@ class Dataset(Base):
         cascade="all, delete-orphan",
         order_by="DatasetEntityMatch.entity_type, DatasetEntityMatch.source_value",
     )
+    repair_forecast_calculations: Mapped[list["RepairForecastCalculation"]] = relationship(
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+        order_by="RepairForecastCalculation.created_at.desc()",
+        foreign_keys="RepairForecastCalculation.dataset_id",
+    )
 
 
 class Record(Base):
@@ -234,3 +240,27 @@ class DatasetEntityMatch(Base):
 
     dataset: Mapped[Dataset] = relationship(back_populates="entity_matches")
     canonical_entity: Mapped[CanonicalEntityValue | None] = relationship(back_populates="dataset_matches")
+
+
+class RepairForecastCalculation(Base):
+    __tablename__ = "repair_forecast_calculations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_id: Mapped[int] = mapped_column(ForeignKey("datasets.id"), nullable=False, index=True)
+    source_dataset_id: Mapped[int | None] = mapped_column(ForeignKey("datasets.id"), nullable=True, index=True)
+    trained_model_id: Mapped[int | None] = mapped_column(ForeignKey("trained_models.id"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="Repair forecast")
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    settings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    dataset: Mapped[Dataset] = relationship(
+        foreign_keys=[dataset_id],
+        back_populates="repair_forecast_calculations",
+    )
+    source_dataset: Mapped[Dataset | None] = relationship(foreign_keys=[source_dataset_id])
+    trained_model: Mapped[TrainedModel | None] = relationship(foreign_keys=[trained_model_id])

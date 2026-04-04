@@ -249,9 +249,51 @@ class GeneratedReportSummary(BaseModel):
 class RepairForecastRequest(BaseModel):
     source_dataset_id: int | None = None
     model_id: int | None = None
+    tail_fact_dataset_id: int | None = None
     base_failure_coefficient: float = 1.1
     nominal_gap_coefficient: float = -0.8
     manual_feature_values: dict[str, float | int | str | None] = {}
+    random_state: int | None = 42
+    min_group_size: int = 20
+    max_sampling_iter: int = 1000
+    tail_distribution: str = "kde"
+    tail_clip_min: float | None = None
+    tail_clip_max: float | None = None
+    tail_fit_to_fact: bool = True
+
+
+class RepairTailPreviewRequest(BaseModel):
+    tail_fact_dataset_id: int | None = None
+    random_state: int | None = 42
+    min_group_size: int = 20
+    max_sampling_iter: int = 1000
+    tail_distribution: str = "kde"
+    tail_clip_min: float | None = None
+    tail_clip_max: float | None = None
+    tail_fit_to_fact: bool = True
+
+
+class RepairTailPreviewResponse(BaseModel):
+    image: str | None = None
+    notes: list[str] = []
+
+
+class SaveRepairForecastRequest(BaseModel):
+    source_dataset_id: int | None = None
+    model_id: int | None = None
+    tail_fact_dataset_id: int | None = None
+    name: str | None = None
+    base_failure_coefficient: float = 1.1
+    nominal_gap_coefficient: float = -0.8
+    manual_feature_values: dict[str, float | int | str | None] = {}
+    random_state: int | None = 42
+    min_group_size: int = 20
+    max_sampling_iter: int = 1000
+    tail_distribution: str = "kde"
+    tail_clip_min: float | None = None
+    tail_clip_max: float | None = None
+    tail_fit_to_fact: bool = True
+    result: "RepairForecastResponse"
 
 
 class RepairForecastSourceDataset(BaseModel):
@@ -278,6 +320,16 @@ class RepairForecastMonthlySummary(BaseModel):
     failure_count: int
 
 
+class RepairForecastSamplingLog(BaseModel):
+    group: str
+    sample_size: int
+    method: str
+    fallback_used: bool
+    t_pred: float | None = None
+    t_fact: float | None = None
+    t_final: float | None = None
+
+
 class RepairForecastResponse(BaseModel):
     start_date: str
     end_date: str
@@ -287,4 +339,38 @@ class RepairForecastResponse(BaseModel):
     source_datasets: list[RepairForecastSourceDataset]
     monthly_summary: list[RepairForecastMonthlySummary] = []
     rows: list[RepairForecastRow]
+    sampling_logs: list[RepairForecastSamplingLog] = []
+    tail_diagnostic_image: str | None = None
     notes: list[str]
+
+
+class RepairForecastCalculationSummary(BaseModel):
+    id: int
+    dataset_id: int
+    source_dataset_id: int | None = None
+    trained_model_id: int | None = None
+    name: str
+    created_at: datetime
+
+
+class RepairForecastCalculationSettings(BaseModel):
+    tail_fact_dataset_id: int | None = None
+    base_failure_coefficient: float = 1.1
+    nominal_gap_coefficient: float = -0.8
+    manual_feature_values: dict[str, float | int | str | None] = {}
+    random_state: int | None = 42
+    min_group_size: int = 20
+    max_sampling_iter: int = 1000
+    tail_distribution: str = "kde"
+    tail_clip_min: float | None = None
+    tail_clip_max: float | None = None
+    tail_fit_to_fact: bool = True
+
+
+class RepairForecastCalculationDetail(BaseModel):
+    summary: RepairForecastCalculationSummary
+    settings: RepairForecastCalculationSettings | None = None
+    result: RepairForecastResponse
+
+
+SaveRepairForecastRequest.model_rebuild()

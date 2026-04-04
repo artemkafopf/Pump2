@@ -313,6 +313,8 @@
             v-else-if="activeModule === 'repairForecast' && factDataset"
             :model-dataset="factDataset.dataset"
             :source-dataset="repairSourceDataset"
+            :source-dataset-options="datasets.filter((item) => item.storage_section === SVODPROGNOZ_SECTION)"
+            :tail-fact-dataset-options="datasets.filter((item) => item.storage_section === 'fact_epu')"
           />
         </template>
 

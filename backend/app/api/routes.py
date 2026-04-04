@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.database import get_db
-from app.db.models import Dataset, Record, TrainedModel
+from app.db.models import Dataset, Record, RepairForecastCalculation, TrainedModel
 from app.schemas.analysis import (
     AnalysisResponse,
     CanonicalEntitySummary,
@@ -27,9 +27,15 @@ from app.schemas.analysis import (
     LLMStatusResponse,
     ManualEntityMatchRequest,
     ManualVariableMatchRequest,
+    RepairForecastCalculationDetail,
+    RepairForecastCalculationSettings,
+    RepairForecastCalculationSummary,
+    RepairTailPreviewRequest,
+    RepairTailPreviewResponse,
     RepairForecastRequest,
     RepairForecastResponse,
     ReportGenerateRequest,
+    SaveRepairForecastRequest,
     SaveForecastModelRequest,
     SavedModelSummary,
     VariableReconcileRequest,
@@ -54,7 +60,12 @@ from app.services.analysis import (
 )
 from app.services.llm_client import llm_client
 from app.services.reporting import generate_report, list_reports
-from app.services.repair_forecast import build_repair_forecast
+from app.services.repair_forecast import (
+    build_repair_forecast,
+    build_tail_preview,
+    repair_forecast_calculation_to_summary,
+    save_repair_forecast_calculation,
+)
 from app.services.row_mapping import (
     entity_dictionary_snapshot,
     get_dataset_entity_matches,
@@ -516,6 +527,17 @@ def calculate_repair_forecast(dataset_id: int, payload: RepairForecastRequest, d
     )
     if source_dataset is None:
         raise HTTPException(status_code=404, detail="Source dataset not found.")
+    tail_fact_dataset = dataset
+    if payload.tail_fact_dataset_id is not None:
+        tail_fact_dataset = db.scalar(
+            select(Dataset)
+            .options(selectinload(Dataset.records), selectinload(Dataset.column_matches))
+            .where(Dataset.id == payload.tail_fact_dataset_id)
+        )
+        if tail_fact_dataset is None:
+            raise HTTPException(status_code=404, detail="Tail fact dataset not found.")
+        if tail_fact_dataset.storage_section != "fact_epu":
+            raise HTTPException(status_code=400, detail="Tail fact dataset must belong to the 'Факт ЭПУ' section.")
     if dataset.storage_section != "fact_epu":
         raise HTTPException(status_code=400, detail="Repair forecast can only be calculated from the 'Факт ЭПУ' dataset.")
 
@@ -524,13 +546,155 @@ def calculate_repair_forecast(dataset_id: int, payload: RepairForecastRequest, d
             db,
             dataset,
             source_dataset,
+            tail_fact_dataset=tail_fact_dataset,
             model_id=payload.model_id,
             base_failure_coefficient=payload.base_failure_coefficient,
             nominal_gap_coefficient=payload.nominal_gap_coefficient,
             manual_feature_values=payload.manual_feature_values,
+            random_state=payload.random_state,
+            min_group_size=payload.min_group_size,
+            max_sampling_iter=payload.max_sampling_iter,
+            tail_distribution=payload.tail_distribution,
+            tail_clip_min=payload.tail_clip_min,
+            tail_clip_max=payload.tail_clip_max,
+            tail_fit_to_fact=payload.tail_fit_to_fact,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/datasets/{dataset_id}/repair-forecast/tail-preview", response_model=RepairTailPreviewResponse)
+def preview_repair_forecast_tail(dataset_id: int, payload: RepairTailPreviewRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset)
+        .options(selectinload(Dataset.records), selectinload(Dataset.column_matches))
+        .where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    if dataset.storage_section != "fact_epu":
+        raise HTTPException(status_code=400, detail="Tail preview can only be built from the 'Факт ЭПУ' dataset.")
+
+    tail_fact_dataset = dataset
+    if payload.tail_fact_dataset_id is not None:
+        tail_fact_dataset = db.scalar(
+            select(Dataset)
+            .options(selectinload(Dataset.records), selectinload(Dataset.column_matches))
+            .where(Dataset.id == payload.tail_fact_dataset_id)
+        )
+        if tail_fact_dataset is None:
+            raise HTTPException(status_code=404, detail="Tail fact dataset not found.")
+        if tail_fact_dataset.storage_section != "fact_epu":
+            raise HTTPException(status_code=400, detail="Tail fact dataset must belong to the 'Факт ЭПУ' section.")
+
+    image, notes = build_tail_preview(
+        fact_dataset=dataset,
+        tail_fact_dataset=tail_fact_dataset,
+        random_state=payload.random_state,
+        min_group_size=payload.min_group_size,
+        max_sampling_iter=payload.max_sampling_iter,
+        tail_distribution=payload.tail_distribution,
+        tail_clip_min=payload.tail_clip_min,
+        tail_clip_max=payload.tail_clip_max,
+        tail_fit_to_fact=payload.tail_fit_to_fact,
+    )
+    return RepairTailPreviewResponse(image=image, notes=notes)
+
+
+@router.get("/datasets/{dataset_id}/repair-forecast/calculations", response_model=list[RepairForecastCalculationSummary])
+def list_repair_forecast_calculations(dataset_id: int, db: Session = Depends(get_db)):
+    dataset = db.scalar(select(Dataset).where(Dataset.id == dataset_id))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    calculations = db.scalars(
+        select(RepairForecastCalculation)
+        .where(RepairForecastCalculation.dataset_id == dataset_id)
+        .order_by(RepairForecastCalculation.created_at.desc(), RepairForecastCalculation.id.desc())
+    ).all()
+    return [RepairForecastCalculationSummary(**repair_forecast_calculation_to_summary(item)) for item in calculations]
+
+
+@router.get("/datasets/{dataset_id}/repair-forecast/calculations/latest", response_model=RepairForecastCalculationDetail | None)
+def get_latest_repair_forecast_calculation(dataset_id: int, db: Session = Depends(get_db)):
+    dataset = db.scalar(select(Dataset).where(Dataset.id == dataset_id))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    item = db.scalar(
+        select(RepairForecastCalculation)
+        .where(RepairForecastCalculation.dataset_id == dataset_id)
+        .order_by(RepairForecastCalculation.created_at.desc(), RepairForecastCalculation.id.desc())
+        .limit(1)
+    )
+    if item is None:
+        return None
+    return RepairForecastCalculationDetail(
+        summary=RepairForecastCalculationSummary(**repair_forecast_calculation_to_summary(item)),
+        settings=RepairForecastCalculationSettings(**(item.settings_json or {})),
+        result=RepairForecastResponse(**item.payload_json),
+    )
+
+
+@router.get("/datasets/{dataset_id}/repair-forecast/calculations/{calculation_id}", response_model=RepairForecastCalculationDetail)
+def get_repair_forecast_calculation(dataset_id: int, calculation_id: int, db: Session = Depends(get_db)):
+    item = db.scalar(
+        select(RepairForecastCalculation)
+        .where(RepairForecastCalculation.dataset_id == dataset_id, RepairForecastCalculation.id == calculation_id)
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Saved repair forecast calculation not found.")
+    return RepairForecastCalculationDetail(
+        summary=RepairForecastCalculationSummary(**repair_forecast_calculation_to_summary(item)),
+        settings=RepairForecastCalculationSettings(**(item.settings_json or {})),
+        result=RepairForecastResponse(**item.payload_json),
+    )
+
+
+@router.post("/datasets/{dataset_id}/repair-forecast/calculations", response_model=RepairForecastCalculationDetail)
+def save_repair_forecast_result(dataset_id: int, payload: SaveRepairForecastRequest, db: Session = Depends(get_db)):
+    dataset = db.scalar(
+        select(Dataset)
+        .options(selectinload(Dataset.trained_models))
+        .where(Dataset.id == dataset_id)
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    source_dataset = None
+    if payload.source_dataset_id is not None:
+        source_dataset = db.scalar(select(Dataset).where(Dataset.id == payload.source_dataset_id))
+
+    selected_model = None
+    if payload.model_id is not None:
+        selected_model = next((model for model in dataset.trained_models if model.id == payload.model_id), None)
+
+    item = save_repair_forecast_calculation(
+        db=db,
+        dataset=dataset,
+        source_dataset=source_dataset,
+        trained_model=selected_model,
+        name=payload.name,
+        settings={
+            "tail_fact_dataset_id": payload.tail_fact_dataset_id,
+            "base_failure_coefficient": payload.base_failure_coefficient,
+            "nominal_gap_coefficient": payload.nominal_gap_coefficient,
+            "manual_feature_values": payload.manual_feature_values,
+            "random_state": payload.random_state,
+            "min_group_size": payload.min_group_size,
+            "max_sampling_iter": payload.max_sampling_iter,
+            "tail_distribution": payload.tail_distribution,
+            "tail_clip_min": payload.tail_clip_min,
+            "tail_clip_max": payload.tail_clip_max,
+            "tail_fit_to_fact": payload.tail_fit_to_fact,
+        },
+        result=payload.result,
+    )
+    return RepairForecastCalculationDetail(
+        summary=RepairForecastCalculationSummary(**repair_forecast_calculation_to_summary(item)),
+        settings=RepairForecastCalculationSettings(**(item.settings_json or {})),
+        result=RepairForecastResponse(**item.payload_json),
+    )
 
 
 @router.get("/datasets/{dataset_id}/reports", response_model=list[GeneratedReportSummary])

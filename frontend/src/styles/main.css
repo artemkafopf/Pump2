@@ -210,14 +210,28 @@ a {
 .prediction-grid .choice-button,
 .prediction-grid .file-button,
 .prediction-grid .primary-button {
-  min-height: 44px;
+  min-height: 36px;
+  padding: 7px 10px;
+  font-size: 0.88rem;
+  line-height: 1.15;
   justify-content: center;
 }
 
 .prediction-grid .note-chip {
+  min-height: 36px;
+  padding: 7px 10px;
+  font-size: 0.88rem;
   justify-content: center;
   white-space: normal;
   text-align: center;
+}
+
+.prediction-grid .button-group {
+  gap: 8px;
+}
+
+.prediction-grid .prediction-actions {
+  gap: 10px;
 }
 
 .prediction-grid .feature-slot-grid {
@@ -1002,6 +1016,28 @@ input[type="range"]::-moz-range-thumb {
   min-height: 340px;
 }
 
+.repair-diagnostic-image-wrap {
+  margin-bottom: 18px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.repair-diagnostic-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+}
+
+.plot-caption {
+  margin: 10px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .table-wrap-top-scroll {
   position: sticky;
   top: 0;
@@ -1031,6 +1067,20 @@ input[type="range"]::-moz-range-thumb {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.04);
+}
+
+.checkbox-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.checkbox-field input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
 }
 
 .repair-scrollbar-label {
