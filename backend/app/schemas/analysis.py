@@ -302,7 +302,7 @@ class SaveRepairForecastRequest(BaseModel):
     tail_bandwidth_mode: str = "scott"
     tail_bandwidth_factor: float = 1.0
     tail_grid_size: int = 256
-    result: "RepairForecastResponse"
+    result: "RepairForecastResponse | None" = None
 
 
 class RepairForecastSourceDataset(BaseModel):

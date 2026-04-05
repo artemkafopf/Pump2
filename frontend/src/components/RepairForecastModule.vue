@@ -837,34 +837,37 @@ const monthlySummaryChartData = computed(() => {
   const baseFailures = months.map(([, entry]) => entry.baseFailures || 0);
   const vnsFailures = months.map(([, entry]) => entry.vnsFailures || 0);
   const monthKeys = months.map(([month]) => month);
-  const activeFund = monthKeys.map((monthKey, monthIndex) => {
-    const fallbackEntry = months[monthIndex]?.[1];
-    const fallbackIndex = fallbackEntry?.lastIndex ?? 0;
+  const activeFund = monthKeys.map((monthKey) => {
     let activeCount = 0;
     selectedScopeRows.value.forEach((row) => {
-      const activationDate = row.activation_date || forecastDates[0];
       const sourceDates = Array.isArray(row.source_dates) ? row.source_dates : [];
       const sourceOilRates = Array.isArray(row.source_oil_rate_series) ? row.source_oil_rate_series : [];
-      let monthOilRate = null;
+      let counted = false;
 
       for (let sourceIndex = 0; sourceIndex < sourceDates.length; sourceIndex += 1) {
-        if (String(sourceDates[sourceIndex] || "").slice(0, 7) === monthKey) {
-          monthOilRate = sourceOilRates[sourceIndex] ?? null;
+        const sourceMonth = String(sourceDates[sourceIndex] || "").slice(0, 7);
+        const sourceOilRate = sourceOilRates[sourceIndex];
+        if (sourceMonth === monthKey && sourceOilRate !== null && sourceOilRate !== undefined && sourceOilRate > 3) {
+          activeCount += 1;
+          counted = true;
+          break;
         }
       }
 
-      if (monthOilRate === null || monthOilRate === undefined) {
-        monthOilRate = Array.isArray(row.oil_rate_series) ? row.oil_rate_series[fallbackIndex] : row.oil_rate;
-      }
-
-      const monthDate = `${monthKey}-01`;
-      const isActive =
-        monthDate >= activationDate &&
-        monthOilRate !== null &&
-        monthOilRate !== undefined &&
-        monthOilRate > 3;
-      if (isActive) {
-        activeCount += 1;
+      if (!counted) {
+        const monthEntry = months.find(([currentMonth]) => currentMonth === monthKey)?.[1];
+        const fallbackIndex = monthEntry?.lastIndex ?? 0;
+        const activationDate = row.activation_date || forecastDates[0];
+        const fallbackOilRate = Array.isArray(row.oil_rate_series) ? row.oil_rate_series[fallbackIndex] : row.oil_rate;
+        const monthDate = forecastDates[fallbackIndex] || `${monthKey}-01`;
+        const isActive =
+          monthDate >= activationDate &&
+          fallbackOilRate !== null &&
+          fallbackOilRate !== undefined &&
+          fallbackOilRate > 3;
+        if (isActive) {
+          activeCount += 1;
+        }
       }
     });
     return activeCount;
@@ -1057,7 +1060,6 @@ async function handleSaveCalculation() {
       tail_bandwidth_mode: tailBandwidthMode.value,
       tail_bandwidth_factor: Number(tailBandwidthFactor.value) || 1,
       tail_grid_size: Number(tailGridSize.value) || 256,
-      result: repairForecast.value,
     });
     latestSavedCalculation.value = saved;
     selectedSavedCalculationId.value = saved.summary.id;

@@ -691,6 +691,52 @@ def save_repair_forecast_result(dataset_id: int, payload: SaveRepairForecastRequ
     if payload.model_id is not None:
         selected_model = next((model for model in dataset.trained_models if model.id == payload.model_id), None)
 
+    result = payload.result
+    if result is None:
+        if source_dataset is None:
+            raise HTTPException(status_code=400, detail="Source dataset is required to save a new repair forecast calculation.")
+
+        tail_fact_dataset = dataset
+        if payload.tail_fact_dataset_id is not None:
+            tail_fact_dataset = db.scalar(
+                select(Dataset)
+                .options(selectinload(Dataset.records), selectinload(Dataset.column_matches))
+                .where(Dataset.id == payload.tail_fact_dataset_id)
+            )
+            if tail_fact_dataset is None:
+                raise HTTPException(status_code=404, detail="Tail fact dataset not found.")
+            if tail_fact_dataset.storage_section != "fact_epu":
+                raise HTTPException(status_code=400, detail="Tail fact dataset must belong to the 'Факт ЭПУ' section.")
+
+        source_dataset = db.scalar(
+            select(Dataset)
+            .options(selectinload(Dataset.records), selectinload(Dataset.column_matches))
+            .where(Dataset.id == payload.source_dataset_id)
+        )
+        if source_dataset is None:
+            raise HTTPException(status_code=404, detail="Source dataset not found.")
+
+        result = build_repair_forecast(
+            db,
+            dataset,
+            source_dataset,
+            tail_fact_dataset=tail_fact_dataset,
+            model_id=payload.model_id,
+            base_failure_coefficient=payload.base_failure_coefficient,
+            nominal_gap_coefficient=payload.nominal_gap_coefficient,
+            manual_feature_values=payload.manual_feature_values,
+            random_state=payload.random_state,
+            min_group_size=payload.min_group_size,
+            max_sampling_iter=payload.max_sampling_iter,
+            tail_distribution=payload.tail_distribution,
+            tail_clip_min=payload.tail_clip_min,
+            tail_clip_max=payload.tail_clip_max,
+            tail_fit_to_fact=payload.tail_fit_to_fact,
+            tail_bandwidth_mode=payload.tail_bandwidth_mode,
+            tail_bandwidth_factor=payload.tail_bandwidth_factor,
+            tail_grid_size=payload.tail_grid_size,
+        )
+
     item = save_repair_forecast_calculation(
         db=db,
         dataset=dataset,
@@ -713,7 +759,7 @@ def save_repair_forecast_result(dataset_id: int, payload: SaveRepairForecastRequ
             "tail_bandwidth_factor": payload.tail_bandwidth_factor,
             "tail_grid_size": payload.tail_grid_size,
         },
-        result=payload.result,
+        result=result,
     )
     return RepairForecastCalculationDetail(
         summary=RepairForecastCalculationSummary(**repair_forecast_calculation_to_summary(item)),
