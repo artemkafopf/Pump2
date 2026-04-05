@@ -254,3 +254,17 @@ export async function saveRepairForecastCalculation(datasetId, payload) {
   });
   return parseResponse(response);
 }
+
+export async function exportRepairForecast(datasetId, payload) {
+  const response = await fetch(`${API_BASE_URL}/datasets/${datasetId}/repair-forecast/export`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return response.blob();
+}

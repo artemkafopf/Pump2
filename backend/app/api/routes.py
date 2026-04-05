@@ -61,6 +61,7 @@ from app.services.analysis import (
 from app.services.llm_client import llm_client
 from app.services.reporting import generate_report, list_reports
 from app.services.repair_forecast import (
+    build_repair_forecast_excel_bytes,
     build_repair_forecast,
     build_tail_preview,
     repair_forecast_calculation_to_summary,
@@ -564,6 +565,21 @@ def calculate_repair_forecast(dataset_id: int, payload: RepairForecastRequest, d
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/datasets/{dataset_id}/repair-forecast/export")
+def export_repair_forecast(dataset_id: int, payload: RepairForecastResponse, db: Session = Depends(get_db)):
+    dataset = db.scalar(select(Dataset).where(Dataset.id == dataset_id))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+
+    file_bytes = build_repair_forecast_excel_bytes(payload)
+    filename = f"repair_forecast_dataset_{dataset_id}.xlsx"
+    return StreamingResponse(
+        BytesIO(file_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/datasets/{dataset_id}/repair-forecast/tail-preview", response_model=RepairTailPreviewResponse)

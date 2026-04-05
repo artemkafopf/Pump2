@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from openpyxl import Workbook
 from sqlalchemy.orm import Session
 from scipy.interpolate import UnivariateSpline
 from scipy.stats import gaussian_kde, norm
@@ -50,6 +51,7 @@ NNO_PATTERNS = ("нно", "mtbf", "наработка на отказ", "mean ti
 RUNTIME_PATTERNS = ("наработ", "runtime", "отработ", "worked")
 DATE_PATTERNS = ("дата", "date", "day", "period")
 LIQUID_RATE_PATTERNS = ("дебж", "дебит жид", "liq", "liquid")
+OIL_RATE_PATTERNS = ("дебн", "дебит неф", "oil", "oil_rate")
 
 
 @dataclass
@@ -535,9 +537,16 @@ def build_tail_diagnostic_image(
 
     groups = sorted(groups)
     figure, axes = plt.subplots(len(groups), 1, figsize=(10, max(3.2 * len(groups), 4.0)), squeeze=False)
+    figure.patch.set_facecolor("#12161f")
     axes_flat = axes.flatten()
 
     for axis, group in zip(axes_flat, groups):
+        axis.set_facecolor("#161b26")
+        axis.grid(True, axis="y", color="#334155", alpha=0.35, linewidth=0.8)
+        for spine in axis.spines.values():
+            spine.set_color("#334155")
+        axis.tick_params(colors="#cbd5e1", labelsize=9)
+
         actual = group_distributions[group]
         sampled = np.asarray(sampled_tail_values.get(group, []), dtype=float)
         t_fact_anchor = float(np.quantile(actual, 0.7)) if actual.size >= 3 else float(np.min(actual))
@@ -610,16 +619,22 @@ def build_tail_diagnostic_image(
 
         axis.axvline(t_fact_anchor, color="#f59e0b", linestyle=":", linewidth=1.5, label="Tail anchor")
 
-        axis.set_title((group_display_names or {}).get(group, group))
-        axis.set_ylabel("Density")
-        axis.legend(loc="upper right")
+        axis.set_title((group_display_names or {}).get(group, group), color="#e5e7eb", fontsize=11, pad=10)
+        axis.set_ylabel("Density", color="#cbd5e1")
+        legend = axis.legend(loc="upper right", facecolor="#111827", edgecolor="#334155", framealpha=0.9)
+        for text in legend.get_texts():
+            text.set_color("#e5e7eb")
 
-    axes_flat[-1].set_xlabel("Runtime")
-    figure.suptitle(f"Fact EPU runtime histogram vs fitted {config.distribution} distribution by group", fontsize=14)
+    axes_flat[-1].set_xlabel("Runtime", color="#cbd5e1")
+    figure.suptitle(
+        f"Fact EPU runtime histogram vs fitted {config.distribution} distribution by group",
+        fontsize=14,
+        color="#f8fafc",
+    )
     figure.tight_layout(rect=(0, 0, 1, 0.97))
 
     buffer = io.BytesIO()
-    figure.savefig(buffer, format="png", dpi=140, bbox_inches="tight")
+    figure.savefig(buffer, format="png", dpi=140, bbox_inches="tight", facecolor=figure.get_facecolor())
     plt.close(figure)
     return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
 
@@ -832,6 +847,7 @@ def identify_key_columns(rows: list[dict]) -> dict[str, str | None]:
         "runtime": find_best_column(columns, RUNTIME_PATTERNS),
         "date": find_best_column(columns, DATE_PATTERNS),
         "liquid_rate": find_best_column(columns, LIQUID_RATE_PATTERNS),
+        "oil_rate": find_best_column(columns, OIL_RATE_PATTERNS),
     }
 
 
@@ -997,6 +1013,18 @@ def prediction_for_date(predictions: list[tuple[date, float | None]], target_dat
     return predictions[0][1] if predictions else None
 
 
+def numeric_series_value_for_date(series: list[tuple[date, float | None]], target_date: date) -> float | None:
+    current = None
+    for row_date, value in series:
+        if row_date <= target_date:
+            current = value
+        else:
+            break
+    if current is not None:
+        return current
+    return series[0][1] if series else None
+
+
 def build_statuses_for_well(
     forecast_dates: list[date],
     catboost_series: list[tuple[date, float | None]],
@@ -1004,26 +1032,28 @@ def build_statuses_for_well(
     actual_nno: float | None,
     runtime_days: float | None,
     base_failure_coefficient: float,
-) -> tuple[list[int], list[str], list[tuple[date, float]]]:
+    start_date: date | None = None,
+) -> tuple[list[int], list[str], list[tuple[date, float]], float | None, float | None, str | None]:
     if not forecast_dates:
-        return [], [], []
+        return [], [], [], None, None, None
 
     statuses = [1] * len(forecast_dates)
     if not catboost_series:
-        return statuses, [], []
-
-    first_catboost_prediction = catboost_series[0][1]
-    first_probabilistic_prediction = (
-        probabilistic_series[0][1] if probabilistic_series else first_catboost_prediction
-    )
-    if first_catboost_prediction is None and first_probabilistic_prediction is None:
-        return statuses, [], []
+        return statuses, [], [], None, None, None
 
     event_dates: list[str] = []
     event_nnos: list[tuple[date, float]] = []
     date_index = {item: index for index, item in enumerate(forecast_dates)}
-    current_anchor = forecast_dates[0]
-    first_failure_offset, first_used_prediction, _ = calculate_first_failure_offset(
+    current_anchor = align_to_forecast_date(start_date or forecast_dates[0], forecast_dates) or forecast_dates[0]
+    first_catboost_prediction = prediction_for_date(catboost_series, current_anchor)
+    first_probabilistic_prediction = (
+        prediction_for_date(probabilistic_series, current_anchor)
+        if probabilistic_series
+        else first_catboost_prediction
+    )
+    if first_catboost_prediction is None and first_probabilistic_prediction is None:
+        return statuses, [], [], None, None, None
+    first_failure_offset, first_used_prediction, first_used_source = calculate_first_failure_offset(
         first_catboost_prediction,
         first_probabilistic_prediction,
         actual_nno,
@@ -1041,17 +1071,20 @@ def build_statuses_for_well(
         statuses[index] = 0
         event_dates.append(aligned.isoformat())
 
-        next_prediction = first_used_prediction if not event_nnos else prediction_for_date(catboost_series, aligned)
-        if next_prediction is None:
+        event_prediction = first_used_prediction if not event_nnos else prediction_for_date(catboost_series, aligned)
+        if event_prediction is None:
             break
-        event_nnos.append((aligned, next_prediction))
+        event_nnos.append((aligned, event_prediction))
 
         current_anchor = aligned
-        next_failure = current_anchor + timedelta(days=max(int(round(next_prediction)), 1))
+        next_interval_prediction = prediction_for_date(catboost_series, aligned)
+        if next_interval_prediction is None:
+            break
+        next_failure = current_anchor + timedelta(days=max(int(round(next_interval_prediction)), 1))
         actual_nno = None
         runtime_days = None
 
-    return statuses, event_dates, event_nnos
+    return statuses, event_dates, event_nnos, first_catboost_prediction, first_probabilistic_prediction, first_used_source
 
 
 def build_repair_forecast(
@@ -1096,6 +1129,7 @@ def build_repair_forecast(
     source_keys = identify_key_columns(source_prepared.rows)
     date_column = source_keys.get("date")
     liquid_rate_column = source_keys.get("liquid_rate")
+    oil_rate_column = source_keys.get("oil_rate")
     identifier_column = source_keys.get("identifier")
     well_column = source_keys.get("well")
 
@@ -1155,6 +1189,7 @@ def build_repair_forecast(
         prediction_series: list[tuple[date, float | None]] = []
         catboost_time_series: list[tuple[date, float | None]] = []
         probabilistic_time_series: list[tuple[date, float | None]] = []
+        oil_rate_time_series: list[tuple[date, float | None]] = []
         catboost_prediction_series: list[float] = []
         probabilistic_prediction_series: list[float] = []
         actual_nno = None
@@ -1224,6 +1259,7 @@ def build_repair_forecast(
                 catboost_prediction_series.append(float(raw_prediction))
             if final_prediction is not None:
                 probabilistic_prediction_series.append(float(final_prediction))
+            oil_rate_time_series.append((row_date, to_float(source_row.get(oil_rate_column)) if oil_rate_column else None))
             catboost_time_series.append((row_date, float(raw_prediction) if raw_prediction is not None else None))
             probabilistic_time_series.append((row_date, float(final_prediction) if final_prediction is not None else None))
             prediction_series.append((row_date, final_prediction))
@@ -1233,13 +1269,51 @@ def build_repair_forecast(
         if runtime_days is None and fact_row and fact_keys.get("runtime"):
             runtime_days = to_float(fact_row.get(fact_keys["runtime"]))
 
-        statuses, event_dates, event_nnos = build_statuses_for_well(
+        oil_rate_daily = [numeric_series_value_for_date(oil_rate_time_series, forecast_date) for forecast_date in forecast_dates]
+        first_liquid_rate = to_float(first_row.get(liquid_rate_column)) if liquid_rate_column else None
+        first_oil_rate = to_float(first_row.get(oil_rate_column)) if oil_rate_column else None
+        category = "Р‘Р°Р·Р°" if first_liquid_rate is not None and first_liquid_rate > 0 else "Р’РќРЎ"
+        activation_date = (
+            forecast_dates[0]
+            if category == "Р‘Р°Р·Р°"
+            else next((forecast_dates[index] for index, value in enumerate(oil_rate_daily) if value is not None and value > 3), None)
+        )
+
+        statuses, event_dates, event_nnos, _, _, _ = build_statuses_for_well(
             forecast_dates,
             catboost_time_series,
             probabilistic_time_series,
             actual_nno,
             runtime_days,
             base_failure_coefficient,
+            start_date=(
+                forecast_dates[0]
+                if category == "Р‘Р°Р·Р°"
+                else next((forecast_dates[index] for index, value in enumerate(oil_rate_daily) if value is not None and value > 3), None)
+            ),
+        )
+
+        display_category = "БАЗА" if first_liquid_rate is not None and first_liquid_rate > 0 else "ВНС"
+        display_activation_date = (
+            forecast_dates[0]
+            if display_category == "БАЗА"
+            else next((forecast_dates[index] for index, value in enumerate(oil_rate_daily) if value is not None and value > 3), None)
+        )
+        (
+            statuses,
+            event_dates,
+            event_nnos,
+            first_catboost_prediction,
+            first_probabilistic_prediction,
+            first_used_source,
+        ) = build_statuses_for_well(
+            forecast_dates,
+            catboost_time_series,
+            probabilistic_time_series,
+            actual_nno,
+            runtime_days,
+            base_failure_coefficient,
+            start_date=display_activation_date,
         )
 
         for event_date, event_nno in event_nnos:
@@ -1248,25 +1322,26 @@ def build_repair_forecast(
             bucket["total_nno"] = float(bucket["total_nno"]) + float(event_nno)
             bucket["failure_count"] = int(bucket["failure_count"]) + 1
 
-        predicted_values = [value for _, value in prediction_series if value is not None]
-        average_prediction = float(sum(predicted_values) / len(predicted_values)) if predicted_values else None
-        average_catboost_prediction = (
-            float(sum(catboost_prediction_series) / len(catboost_prediction_series)) if catboost_prediction_series else None
+        displayed_catboost_prediction = first_catboost_prediction
+        displayed_probabilistic_prediction = first_probabilistic_prediction
+        displayed_prediction = (
+            displayed_catboost_prediction
+            if first_used_source == "catboost"
+            else displayed_probabilistic_prediction
         )
-        average_probabilistic_prediction = (
-            float(sum(probabilistic_prediction_series) / len(probabilistic_prediction_series))
-            if probabilistic_prediction_series
-            else None
+        used_prediction_source = first_used_source or (
+            "catboost" if displayed_catboost_prediction is not None else "probabilistic"
         )
-        used_prediction_source = "probabilistic"
-        if average_catboost_prediction is not None and average_probabilistic_prediction is not None:
-            if abs(average_catboost_prediction - average_probabilistic_prediction) <= 1e-9:
-                used_prediction_source = "catboost"
-        elif average_catboost_prediction is not None:
-            used_prediction_source = "catboost"
 
         first_liquid_rate = to_float(first_row.get(liquid_rate_column)) if liquid_rate_column else None
+        first_oil_rate = to_float(first_row.get(oil_rate_column)) if oil_rate_column else None
         category = "База" if first_liquid_rate is not None and first_liquid_rate > 0 else "ВНС"
+
+        category = display_category
+        display_well_name = stringify(first_row.get(well_column)) or "Неизвестная скважина"
+        display_activation_date_iso = display_activation_date.isoformat() if display_activation_date else None
+        if not display_well_name:
+            display_well_name = "Well"
 
         result_rows.append(
             RepairForecastRow(
@@ -1275,16 +1350,29 @@ def build_repair_forecast(
                 license_area=stringify(first_row.get(identifier_column)),
                 cluster_name=stringify(first_row.get(source_keys["cluster"])) if source_keys.get("cluster") else None,
                 well_name=stringify(first_row.get(well_column)) or "Неизвестная скважина",
-                catboost_nno=average_catboost_prediction,
-                probabilistic_nno=average_probabilistic_prediction,
-                predicted_nno=average_prediction,
+                catboost_nno=displayed_catboost_prediction,
+                probabilistic_nno=displayed_probabilistic_prediction,
+                predicted_nno=displayed_prediction,
                 used_prediction_source=used_prediction_source,
                 actual_nno=actual_nno,
+                oil_rate=first_oil_rate,
+                oil_rate_series=oil_rate_daily,
+                activation_date=(
+                    forecast_dates[0].isoformat()
+                    if category == "Р‘Р°Р·Р°"
+                    else next((forecast_dates[index].isoformat() for index, value in enumerate(oil_rate_daily) if value is not None and value > 3), None)
+                ),
                 runtime_days=runtime_days,
                 event_dates=event_dates,
                 statuses=statuses,
             )
         )
+        result_rows[-1].well_name = display_well_name
+        result_rows[-1].activation_date = display_activation_date_iso
+        result_rows[-1].source_dates = [row_date.isoformat() for row_date, _ in items]
+        result_rows[-1].source_oil_rate_series = [
+            to_float(source_row.get(oil_rate_column)) if oil_rate_column else None for _, source_row in items
+        ]
 
     if selected_model is None:
         notes.append("Сохраненная модель не выбрана, используется текущая конфигурация CatBoost.")
@@ -1391,3 +1479,58 @@ def save_repair_forecast_calculation(
     db.commit()
     db.refresh(item)
     return item
+
+
+def build_repair_forecast_excel_bytes(result: RepairForecastResponse) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Repair forecast"
+
+    fixed_columns = [
+        "Категория",
+        "Участок недр",
+        "Куст",
+        "Скважина",
+        "Прогноз CatBoost",
+        "Вероятностный прогноз",
+        "Использовано",
+        "Факт ННО",
+        "ДебН, т/сут",
+        "Дата активации",
+    ]
+    sheet.append(fixed_columns + list(result.dates))
+
+    for row in result.rows:
+        statuses = list(row.statuses or [])
+        if len(statuses) < len(result.dates):
+            statuses.extend([1] * (len(result.dates) - len(statuses)))
+        elif len(statuses) > len(result.dates):
+            statuses = statuses[: len(result.dates)]
+
+        sheet.append(
+            [
+                row.category,
+                row.license_area,
+                row.cluster_name,
+                row.well_name,
+                row.catboost_nno,
+                row.probabilistic_nno,
+                row.used_prediction_source,
+                row.actual_nno,
+                row.oil_rate,
+                row.activation_date,
+                *statuses,
+            ]
+        )
+
+    summary = workbook.create_sheet("Summary")
+    summary.append(["Start date", result.start_date])
+    summary.append(["End date", result.end_date])
+    summary.append(["Used feature columns", ", ".join(result.used_feature_columns or [])])
+    summary.append(["Missing feature columns", ", ".join(result.missing_feature_columns or [])])
+    for note in result.notes or []:
+        summary.append(["Note", note])
+
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()

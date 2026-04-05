@@ -321,6 +321,11 @@ class RepairForecastRow(BaseModel):
     predicted_nno: float | None = None
     used_prediction_source: str | None = None
     actual_nno: float | None = None
+    oil_rate: float | None = None
+    oil_rate_series: list[float | None] = []
+    source_dates: list[str] = []
+    source_oil_rate_series: list[float | None] = []
+    activation_date: str | None = None
     runtime_days: float | None = None
     event_dates: list[str] = []
     statuses: list[int]

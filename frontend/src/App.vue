@@ -18,6 +18,16 @@
             <button
               type="button"
               class="dataset-item module-item"
+              :class="{ active: activeModule === 'home' }"
+              @click="activeModule = 'home'"
+            >
+              <span class="dataset-name">Домашняя страница</span>
+              <span class="dataset-meta">Обзор системы, быстрый старт и переход к рабочим модулям</span>
+            </button>
+
+            <button
+              type="button"
+              class="dataset-item module-item"
               :class="{ active: activeModule === 'storage' }"
               @click="activeModule = 'storage'"
             >
@@ -247,6 +257,51 @@
           </section>
         </div>
 
+        <template v-else-if="activeModule === 'home'">
+          <section class="panel empty-big">
+            <div class="panel-header">
+              <div>
+                <h2>Домашняя страница</h2>
+                <p>
+                  Добро пожаловать в WOWPUMP. Отсюда можно перейти к хранению данных, словарю и отчётам,
+                  анализу работы насосов, настройке модели отказов и прогнозу ремонтов.
+                </p>
+              </div>
+            </div>
+
+            <div class="overview-grid">
+              <div class="metric-card">
+                <span class="metric-label">Всего наборов данных</span>
+                <strong>{{ datasets.length }}</strong>
+              </div>
+              <div class="metric-card">
+                <span class="metric-label">Факт ЭПУ</span>
+                <strong>{{ datasets.filter((item) => item.storage_section === FACT_EPU_SECTION).length }}</strong>
+              </div>
+              <div class="metric-card">
+                <span class="metric-label">Сводпрогноз</span>
+                <strong>{{ datasets.filter((item) => item.storage_section === SVODPROGNOZ_SECTION).length }}</strong>
+              </div>
+              <div class="metric-card">
+                <span class="metric-label">Текущий Факт ЭПУ</span>
+                <strong>{{ factDataset?.dataset?.name || "Не загружен" }}</strong>
+              </div>
+            </div>
+
+            <div class="note-list">
+              <p>
+                Для начала работы загрузи Excel-файлы в модуле <strong>Хранение данных</strong>, затем выбери
+                целевую переменную в <strong>Анализе работы насосов</strong> и настрой модель в
+                <strong>Настройке модели отказов</strong>.
+              </p>
+              <p>
+                Модуль <strong>Прогноз ремонтов</strong> использует текущий датасет <strong>Факт ЭПУ</strong>,
+                выбранный <strong>Сводпрогноз</strong> и сохранённую или активную модель CatBoost.
+              </p>
+            </div>
+          </section>
+        </template>
+
         <template v-else-if="displayDataset && displayAnalysis">
           <section class="panel dataset-headline">
             <div class="panel-header">
@@ -372,7 +427,7 @@ const loadingData = ref(false);
 const savingSelection = ref(false);
 const errorMessage = ref("");
 const storageSection = ref(FACT_EPU_SECTION);
-const activeModule = ref("analysis");
+const activeModule = ref("home");
 const sidebarCollapsed = ref(false);
 const mappingDialog = ref({
   open: false,

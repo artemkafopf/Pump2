@@ -184,6 +184,9 @@
           <button type="button" class="file-button" :disabled="savingCalculation || !repairForecast" @click="handleSaveCalculation">
             {{ savingCalculation ? "Сохранение..." : "Сохранить расчёт" }}
           </button>
+          <button type="button" class="file-button" :disabled="exportingForecast || !repairForecast" @click="handleExportForecast">
+            {{ exportingForecast ? "Выгрузка..." : "Выгрузить Excel" }}
+          </button>
           <button
             v-if="selectedScopeKey"
             type="button"
@@ -364,6 +367,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import PlotlyChart from "./PlotlyChart.vue";
 import {
   calculateRepairForecast,
+  exportRepairForecast,
   fetchRepairForecastCalculation,
   fetchLatestRepairForecastCalculation,
   listRepairForecastCalculations,
@@ -381,6 +385,7 @@ const props = defineProps({
 
 const loading = ref(false);
 const savingCalculation = ref(false);
+const exportingForecast = ref(false);
 const repairForecast = ref(null);
 const savedModels = ref([]);
 const savedCalculations = ref([]);
@@ -801,39 +806,169 @@ const selectedScopeLabel = computed(() => {
 });
 
 const monthlySummaryChartData = computed(() => {
+  const forecastDates = repairForecast.value?.dates || [];
+  if (!forecastDates.length) {
+    return [];
+  }
+
   const bucket = new Map();
-  selectedScopeRows.value.forEach((row) => {
-    (row.event_dates || []).forEach((isoDate) => {
-      const value = new Date(`${isoDate}T00:00:00`);
-      if (Number.isNaN(value.getTime())) return;
-      const monthKey = `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}`;
-      bucket.set(monthKey, (bucket.get(monthKey) || 0) + 1);
+  forecastDates.forEach((isoDate, index) => {
+    const value = new Date(`${isoDate}T00:00:00`);
+    if (Number.isNaN(value.getTime())) return;
+    const monthKey = `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}`;
+    const entry = bucket.get(monthKey) || {
+      baseFailures: 0,
+      vnsFailures: 0,
+      lastIndex: index,
+    };
+    selectedScopeRows.value.forEach((row) => {
+      const categoryKey = String(row.category || "").toUpperCase() === "БАЗА" ? "base" : "vns";
+      const status = row.statuses?.[index] ?? 1;
+      if (status === 0) {
+        if (categoryKey === "base") entry.baseFailures += 1;
+        else entry.vnsFailures += 1;
+      }
     });
+    entry.lastIndex = index;
+    bucket.set(monthKey, entry);
   });
 
   const months = Array.from(bucket.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  const baseFailures = months.map(([, entry]) => entry.baseFailures || 0);
+  const vnsFailures = months.map(([, entry]) => entry.vnsFailures || 0);
+  const monthKeys = months.map(([month]) => month);
+  const activeFund = monthKeys.map((monthKey, monthIndex) => {
+    const fallbackEntry = months[monthIndex]?.[1];
+    const fallbackIndex = fallbackEntry?.lastIndex ?? 0;
+    let activeCount = 0;
+    selectedScopeRows.value.forEach((row) => {
+      const activationDate = row.activation_date || forecastDates[0];
+      const sourceDates = Array.isArray(row.source_dates) ? row.source_dates : [];
+      const sourceOilRates = Array.isArray(row.source_oil_rate_series) ? row.source_oil_rate_series : [];
+      let monthOilRate = null;
+
+      for (let sourceIndex = 0; sourceIndex < sourceDates.length; sourceIndex += 1) {
+        if (String(sourceDates[sourceIndex] || "").slice(0, 7) === monthKey) {
+          monthOilRate = sourceOilRates[sourceIndex] ?? null;
+        }
+      }
+
+      if (monthOilRate === null || monthOilRate === undefined) {
+        monthOilRate = Array.isArray(row.oil_rate_series) ? row.oil_rate_series[fallbackIndex] : row.oil_rate;
+      }
+
+      const monthDate = `${monthKey}-01`;
+      const isActive =
+        monthDate >= activationDate &&
+        monthOilRate !== null &&
+        monthOilRate !== undefined &&
+        monthOilRate > 3;
+      if (isActive) {
+        activeCount += 1;
+      }
+    });
+    return activeCount;
+  });
+  const failureRate = months.map(([, entry], index) => {
+    const failures = (entry.baseFailures || 0) + (entry.vnsFailures || 0);
+    const active = activeFund[index] || 0;
+    return active > 0 ? Number((failures / active).toFixed(3)) : 0;
+  });
+
   return [
     {
       type: "bar",
       x: months.map(([month]) => month),
-      y: months.map(([, count]) => count),
-      text: months.map(([, count]) => String(count)),
-      textposition: "outside",
-      cliponaxis: false,
+      y: baseFailures,
+      name: "Отказы БАЗА",
       marker: {
         color: "#60a5fa",
         line: { color: "#93c5fd", width: 1 },
       },
-      hovertemplate: "Месяц: %{x}<br>Отказов: %{y}<extra></extra>",
+      text: baseFailures.map((value) => (value ? String(value) : "")),
+      textposition: "inside",
+      hovertemplate: "Месяц: %{x}<br>БАЗА: %{y}<extra></extra>",
+    },
+    {
+      type: "bar",
+      x: months.map(([month]) => month),
+      y: vnsFailures,
+      name: "Отказы ВНС",
+      marker: {
+        color: "#f59e0b",
+        line: { color: "#fcd34d", width: 1 },
+      },
+      text: vnsFailures.map((value) => (value ? String(value) : "")),
+      textposition: "inside",
+      hovertemplate: "Месяц: %{x}<br>ВНС: %{y}<extra></extra>",
+    },
+    {
+      type: "scatter",
+      mode: "lines+markers+text",
+      x: months.map(([month]) => month),
+      y: activeFund,
+      name: "Действующий фонд",
+      yaxis: "y2",
+      line: {
+        color: "#34d399",
+        width: 3,
+      },
+      marker: {
+        color: "#6ee7b7",
+        size: 7,
+      },
+      text: activeFund.map((value) => (value ? String(value) : "")),
+      textposition: "top center",
+      hovertemplate: "Месяц: %{x}<br>Действующий фонд: %{y}<extra></extra>",
+    },
+    {
+      type: "scatter",
+      mode: "lines+markers+text",
+      x: months.map(([month]) => month),
+      y: failureRate,
+      name: "Коэффициент отказности",
+      yaxis: "y3",
+      line: {
+        color: "#f472b6",
+        width: 3,
+        dash: "dot",
+      },
+      marker: {
+        color: "#f9a8d4",
+        size: 7,
+      },
+      text: failureRate.map((value) => (value ? String(value) : "")),
+      textposition: "bottom center",
+      hovertemplate: "Месяц: %{x}<br>Коэффициент отказности: %{y}<extra></extra>",
     },
   ];
 });
 
 const monthlySummaryChartLayout = computed(() => ({
-  height: 320,
-  margin: { l: 60, r: 20, t: 16, b: 80 },
+  height: 360,
+  margin: { l: 60, r: 70, t: 16, b: 80 },
+  barmode: "stack",
   xaxis: { title: "Месяц", tickangle: -35 },
   yaxis: { title: "Отказы, шт" },
+  yaxis2: {
+    title: "Действующий фонд",
+    overlaying: "y",
+    side: "right",
+    rangemode: "tozero",
+  },
+  yaxis3: {
+    title: "Коэффициент отказности",
+    overlaying: "y",
+    side: "right",
+    anchor: "free",
+    position: 1,
+    rangemode: "tozero",
+    tickformat: ".3f",
+  },
+  legend: {
+    orientation: "h",
+    y: 1.14,
+  },
 }));
 
 async function syncScrollWidths() {
@@ -931,6 +1066,31 @@ async function handleSaveCalculation() {
     requestError.value = error?.message || "Не удалось сохранить расчёт.";
   } finally {
     savingCalculation.value = false;
+  }
+}
+
+async function handleExportForecast() {
+  if (!repairForecast.value) return;
+  exportingForecast.value = true;
+  requestError.value = "";
+
+  try {
+    const blob = await exportRepairForecast(props.modelDataset.id, repairForecast.value);
+    const safeName = (selectedSourceDataset.value?.name || props.modelDataset.name || "repair_forecast")
+      .replace(/[\\\\/:*?\"<>|]+/g, "_")
+      .replace(/\s+/g, "_");
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${safeName}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    requestError.value = error?.message || "Не удалось выгрузить таблицу прогноза.";
+  } finally {
+    exportingForecast.value = false;
   }
 }
 
