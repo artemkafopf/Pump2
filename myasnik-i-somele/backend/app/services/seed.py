@@ -80,7 +80,7 @@ def ensure_sample_events(session: Session) -> None:
     for item in events:
         session.add(
             Event(
-                slug=slugify(item["title"]),
+                slug=slugify(item["title"]).strip("-") or "event",
                 title=item["title"],
                 short_description=item["short_description"],
                 description=item["description"],

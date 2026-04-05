@@ -23,6 +23,19 @@ from app.services.payments import build_payment_payload
 router = APIRouter()
 
 
+def build_unique_slug(db: Session, title: str, *, event_id: int | None = None) -> str:
+    base_slug = slugify(title).strip("-") or "event"
+    slug = base_slug
+    suffix = 2
+
+    while True:
+        existing_id = db.scalar(select(Event.id).where(Event.slug == slug))
+        if existing_id is None or existing_id == event_id:
+            return slug
+        slug = f"{base_slug}-{suffix}"
+        suffix += 1
+
+
 def reserved_seats_for_event(db: Session, event_id: int) -> int:
     reserved = db.scalar(
         select(func.coalesce(func.sum(Booking.seats), 0)).where(
@@ -257,16 +270,9 @@ def create_event(
     db: Session = Depends(get_db),
     _: AdminUser = Depends(get_current_admin),
 ) -> EventDetail:
-    slug_base = slugify(payload.title)
-    slug = slug_base
-    suffix = 2
-    while db.scalar(select(Event.id).where(Event.slug == slug)):
-        slug = f"{slug_base}-{suffix}"
-        suffix += 1
-
     published_at = datetime.now(timezone.utc) if payload.status == EventStatus.published.value else None
     event = Event(
-        slug=slug,
+        slug=build_unique_slug(db, payload.title),
         title=payload.title.strip(),
         short_description=payload.short_description.strip(),
         description=payload.description.strip(),
@@ -303,7 +309,7 @@ def update_event(
         setattr(event, key, value)
 
     if "title" in data:
-        event.slug = slugify(event.title)
+        event.slug = build_unique_slug(db, event.title, event_id=event.id)
     if data.get("status") == EventStatus.published.value and event.published_at is None:
         event.published_at = datetime.now(timezone.utc)
     if data.get("status") == EventStatus.archived.value:

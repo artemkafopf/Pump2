@@ -558,6 +558,9 @@ def calculate_repair_forecast(dataset_id: int, payload: RepairForecastRequest, d
             tail_clip_min=payload.tail_clip_min,
             tail_clip_max=payload.tail_clip_max,
             tail_fit_to_fact=payload.tail_fit_to_fact,
+            tail_bandwidth_mode=payload.tail_bandwidth_mode,
+            tail_bandwidth_factor=payload.tail_bandwidth_factor,
+            tail_grid_size=payload.tail_grid_size,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -597,6 +600,9 @@ def preview_repair_forecast_tail(dataset_id: int, payload: RepairTailPreviewRequ
         tail_clip_min=payload.tail_clip_min,
         tail_clip_max=payload.tail_clip_max,
         tail_fit_to_fact=payload.tail_fit_to_fact,
+        tail_bandwidth_mode=payload.tail_bandwidth_mode,
+        tail_bandwidth_factor=payload.tail_bandwidth_factor,
+        tail_grid_size=payload.tail_grid_size,
     )
     return RepairTailPreviewResponse(image=image, notes=notes)
 
@@ -687,6 +693,9 @@ def save_repair_forecast_result(dataset_id: int, payload: SaveRepairForecastRequ
             "tail_clip_min": payload.tail_clip_min,
             "tail_clip_max": payload.tail_clip_max,
             "tail_fit_to_fact": payload.tail_fit_to_fact,
+            "tail_bandwidth_mode": payload.tail_bandwidth_mode,
+            "tail_bandwidth_factor": payload.tail_bandwidth_factor,
+            "tail_grid_size": payload.tail_grid_size,
         },
         result=payload.result,
     )

@@ -79,6 +79,7 @@
             <label class="field">
               <span>Функция распределения</span>
               <select v-model="tailDistribution">
+                <option value="empirical">Empirical по фактическому хвосту</option>
                 <option value="kde">KDE по фактическим данным</option>
                 <option value="spline">Сплайновая аппроксимация</option>
                 <option value="normal">Нормальное распределение</option>
@@ -103,6 +104,25 @@
             <label class="field">
               <span>Max обрезка</span>
               <input v-model="tailClipMaxInput" type="number" step="0.1" placeholder="Авто" />
+            </label>
+
+            <label class="field">
+              <span>Bandwidth mode</span>
+              <select v-model="tailBandwidthMode">
+                <option value="scott">Scott</option>
+                <option value="silverman">Silverman</option>
+                <option value="fixed">Fixed</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Bandwidth factor</span>
+              <input v-model.number="tailBandwidthFactor" type="number" min="0.05" max="10" step="0.05" />
+            </label>
+
+            <label class="field">
+              <span>Grid size</span>
+              <input v-model.number="tailGridSize" type="number" min="64" max="4096" step="64" />
             </label>
 
             <label class="field">
@@ -135,9 +155,9 @@
           <div v-if="tailPreview?.image" class="repair-diagnostic-image-wrap">
             <img :src="tailPreview.image" alt="Диагностика хвостового распределения" class="repair-diagnostic-image" />
             <p class="plot-caption">
-              Гистограмма показывает фактические значения ННО из выбранного набора «Факт ЭПУ», синяя линия — выбранную функцию
-              распределения с текущими настройками, полупрозрачные столбцы — сгенерированные хвостовые значения, зелёные кресты —
-              фактически сэмплированные точки хвоста, которые использует алгоритм.
+              Красная гистограмма показывает фактические значения ННО, синяя линия — целевую tail density по выбранной функции,
+              синяя полупрозрачная гистограмма и зелёная пунктирная линия — распределение реально сгенерированных хвостовых значений.
+              Зелёные кресты показывают отдельные sampled points, которые использует алгоритм.
             </p>
             <p v-if="tailPreview?.notes?.length" class="plot-caption">{{ tailPreview.notes.join(" ") }}</p>
           </div>
@@ -276,7 +296,9 @@
                 <th>Скважина</th>
                 <th>Уровень</th>
                 <th>Отказов</th>
-                <th>Средний прогноз ННО</th>
+                <th>Прогноз CatBoost</th>
+                <th>Вероятностный прогноз</th>
+                <th>Использовано</th>
                 <th>Факт ННО</th>
                 <th v-for="column in groupedDateColumns" :key="`repair-date-${column.key}`" class="repair-date-column">
                   {{ column.label }}
@@ -312,7 +334,13 @@
                 <td>{{ row.nodeType === "well" ? row.well_name : "-" }}</td>
                 <td>{{ levelLabel(row.nodeType) }}</td>
                 <td>{{ row.failureCount }}</td>
-                <td>{{ formatOneDecimal(row.predicted_nno) }}</td>
+                <td>{{ formatOneDecimal(row.catboost_nno) }}</td>
+                <td>{{ formatOneDecimal(row.probabilistic_nno) }}</td>
+                <td>
+                  <span class="repair-prediction-badge" :class="repairPredictionSourceClass(row.used_prediction_source)">
+                    {{ repairPredictionSourceLabel(row.used_prediction_source) }}
+                  </span>
+                </td>
                 <td>{{ formatOneDecimal(row.actual_nno) }}</td>
                 <td
                   v-for="column in groupedDateColumns"
@@ -362,10 +390,13 @@ const selectedModelId = ref(null);
 const selectedSourceDatasetId = ref(null);
 const selectedTailFactDatasetId = ref(null);
 const baseFailureCoefficient = ref(1.1);
-const tailDistribution = ref("kde");
+const tailDistribution = ref("empirical");
 const tailClipMinInput = ref("");
 const tailClipMaxInput = ref("");
 const tailFitToFact = ref(true);
+const tailBandwidthMode = ref("scott");
+const tailBandwidthFactor = ref(1);
+const tailGridSize = ref(256);
 const minGroupSize = ref(20);
 const maxSamplingIter = ref(1000);
 const randomStateInput = ref("42");
@@ -466,10 +497,13 @@ function applySavedSettings(settings) {
   if (!settings) return;
   selectedTailFactDatasetId.value = settings.tail_fact_dataset_id ?? selectedTailFactDatasetId.value;
   baseFailureCoefficient.value = settings.base_failure_coefficient ?? 1.1;
-  tailDistribution.value = settings.tail_distribution || "kde";
+  tailDistribution.value = settings.tail_distribution || "empirical";
   tailClipMinInput.value = settings.tail_clip_min ?? "";
   tailClipMaxInput.value = settings.tail_clip_max ?? "";
   tailFitToFact.value = settings.tail_fit_to_fact ?? true;
+  tailBandwidthMode.value = settings.tail_bandwidth_mode || "scott";
+  tailBandwidthFactor.value = settings.tail_bandwidth_factor ?? 1;
+  tailGridSize.value = settings.tail_grid_size ?? 256;
   minGroupSize.value = settings.min_group_size ?? 20;
   maxSamplingIter.value = settings.max_sampling_iter ?? 1000;
   randomStateInput.value = settings.random_state ?? "42";
@@ -489,6 +523,9 @@ async function refreshTailPreview() {
       tail_clip_min: parseOptionalNumber(tailClipMinInput.value),
       tail_clip_max: parseOptionalNumber(tailClipMaxInput.value),
       tail_fit_to_fact: tailFitToFact.value,
+      tail_bandwidth_mode: tailBandwidthMode.value,
+      tail_bandwidth_factor: Number(tailBandwidthFactor.value) || 1,
+      tail_grid_size: Number(tailGridSize.value) || 256,
     });
   } catch (error) {
     tailPreview.value = {
@@ -639,7 +676,10 @@ const hierarchyRows = computed(() => {
         license_area: licenseKey,
         cluster_name: null,
         well_name: null,
+        catboost_nno: averageValue(licenseRows.map((item) => item.catboost_nno)),
+        probabilistic_nno: averageValue(licenseRows.map((item) => item.probabilistic_nno)),
         predicted_nno: averageValue(licenseRows.map((item) => item.predicted_nno)),
+        used_prediction_source: summarizePredictionSource(licenseRows),
         actual_nno: averageValue(licenseRows.map((item) => item.actual_nno)),
         failureCount: licenseRows.reduce((sum, item) => sum + item.failureCount, 0),
         groupedStatuses: aggregateStatuses(licenseRows, columns),
@@ -661,7 +701,10 @@ const hierarchyRows = computed(() => {
             license_area: licenseKey,
             cluster_name: clusterKey,
             well_name: null,
+            catboost_nno: averageValue(clusterRows.map((item) => item.catboost_nno)),
+            probabilistic_nno: averageValue(clusterRows.map((item) => item.probabilistic_nno)),
             predicted_nno: averageValue(clusterRows.map((item) => item.predicted_nno)),
+            used_prediction_source: summarizePredictionSource(clusterRows),
             actual_nno: averageValue(clusterRows.map((item) => item.actual_nno)),
             failureCount: clusterRows.reduce((sum, item) => sum + item.failureCount, 0),
             groupedStatuses: aggregateStatuses(clusterRows, columns),
@@ -699,6 +742,27 @@ function summarizeCategories(rows) {
   const categories = Array.from(new Set(rows.map((row) => row.category).filter(Boolean)));
   if (!categories.length) return "-";
   return categories.join(", ");
+}
+
+function summarizePredictionSource(rows) {
+  const values = Array.from(new Set(rows.map((row) => row.used_prediction_source).filter(Boolean)));
+  if (!values.length) return null;
+  if (values.length === 1) return values[0];
+  return "mixed";
+}
+
+function repairPredictionSourceLabel(value) {
+  if (value === "catboost") return "CatBoost";
+  if (value === "probabilistic") return "Вероятностный";
+  if (value === "mixed") return "Смешанный";
+  return "-";
+}
+
+function repairPredictionSourceClass(value) {
+  if (value === "catboost") return "repair-prediction--catboost";
+  if (value === "probabilistic") return "repair-prediction--probabilistic";
+  if (value === "mixed") return "repair-prediction--mixed";
+  return "";
 }
 
 const selectedScopeRows = computed(() => {
@@ -822,6 +886,9 @@ async function runForecast() {
       tail_clip_min: parseOptionalNumber(tailClipMinInput.value),
       tail_clip_max: parseOptionalNumber(tailClipMaxInput.value),
       tail_fit_to_fact: tailFitToFact.value,
+      tail_bandwidth_mode: tailBandwidthMode.value,
+      tail_bandwidth_factor: Number(tailBandwidthFactor.value) || 1,
+      tail_grid_size: Number(tailGridSize.value) || 256,
     });
     syncForecastStateFromResult();
     await syncScrollWidths();
@@ -852,6 +919,9 @@ async function handleSaveCalculation() {
       tail_clip_min: parseOptionalNumber(tailClipMinInput.value),
       tail_clip_max: parseOptionalNumber(tailClipMaxInput.value),
       tail_fit_to_fact: tailFitToFact.value,
+      tail_bandwidth_mode: tailBandwidthMode.value,
+      tail_bandwidth_factor: Number(tailBandwidthFactor.value) || 1,
+      tail_grid_size: Number(tailGridSize.value) || 256,
       result: repairForecast.value,
     });
     latestSavedCalculation.value = saved;
@@ -943,6 +1013,9 @@ watch(
     tailClipMinInput,
     tailClipMaxInput,
     tailFitToFact,
+    tailBandwidthMode,
+    tailBandwidthFactor,
+    tailGridSize,
     minGroupSize,
     maxSamplingIter,
     randomStateInput,

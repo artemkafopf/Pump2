@@ -1196,6 +1196,34 @@ input[type="range"]::-moz-range-thumb {
   background: rgba(96, 165, 250, 0.12) !important;
 }
 
+.repair-prediction-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.repair-prediction--catboost {
+  background: rgba(96, 165, 250, 0.14);
+  color: #bfdbfe;
+}
+
+.repair-prediction--probabilistic {
+  background: rgba(16, 185, 129, 0.14);
+  color: #a7f3d0;
+}
+
+.repair-prediction--mixed {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fde68a;
+}
+
 .repair-tree-cell {
   display: flex;
   align-items: center;

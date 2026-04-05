@@ -40,7 +40,7 @@ DEFAULT_RANDOM_STATE = 42
 DEFAULT_MIN_GROUP_SIZE = 20
 DEFAULT_MAX_SAMPLING_ITER = 1000
 TAIL_UPPER_QUANTILE = 0.995
-TAIL_DISTRIBUTIONS = {"kde", "spline", "normal"}
+TAIL_DISTRIBUTIONS = {"empirical", "kde", "spline", "normal"}
 
 FIELD_PATTERNS = ("месторожд", "field", "field_name")
 CLUSTER_PATTERNS = ("куст", "cluster", "pad", "cluster_name")
@@ -61,10 +61,13 @@ class PreparedDataset:
 
 @dataclass
 class TailSamplingConfig:
-    distribution: str = "kde"
+    distribution: str = "empirical"
     clip_min: float | None = None
     clip_max: float | None = None
     fit_to_fact: bool = True
+    bandwidth_mode: str = "scott"
+    bandwidth_factor: float = 1.0
+    grid_size: int = 256
 
 
 def _build_rng(random_state: int | None) -> np.random.Generator:
@@ -111,6 +114,156 @@ def _fallback_positive_delta(values: np.ndarray, rng: np.random.Generator) -> fl
             return float(rng.choice(positive_diffs))
     scale_source = np.median(values) if values.size else 1.0
     return float(max(scale_source * 0.05, 1.0))
+
+
+def _resolve_grid_size(config: TailSamplingConfig) -> int:
+    return int(min(max(int(config.grid_size or 256), 64), 4096))
+
+
+def _resolve_kde_bandwidth(config: TailSamplingConfig):
+    mode = (config.bandwidth_mode or "scott").strip().lower()
+    factor = float(config.bandwidth_factor or 1.0)
+    factor = min(max(factor, 0.05), 10.0)
+
+    if mode == "fixed":
+        return factor
+
+    def _bw_method(kde):
+        base = kde.scotts_factor() if mode != "silverman" else kde.silverman_factor()
+        return float(base * factor)
+
+    return _bw_method
+
+
+def _normalize_pdf_grid(x_values: np.ndarray, y_values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    x = np.asarray(x_values, dtype=float)
+    y = np.clip(np.asarray(y_values, dtype=float), a_min=0.0, a_max=None)
+    valid = np.isfinite(x) & np.isfinite(y)
+    x = x[valid]
+    y = y[valid]
+    if x.size < 2 or y.size < 2:
+        return None
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+    if np.all(y <= 0):
+        return None
+    area = float(np.trapz(y, x))
+    if not np.isfinite(area) or area <= 0:
+        return None
+    return x, y / area
+
+
+def _build_cdf_from_pdf(x_values: np.ndarray, y_values: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    normalized = _normalize_pdf_grid(x_values, y_values)
+    if normalized is None:
+        return None
+    x, y = normalized
+    cdf = np.zeros_like(x)
+    if x.size > 1:
+        cdf[1:] = np.cumsum((y[1:] + y[:-1]) * np.diff(x) * 0.5)
+    final = float(cdf[-1])
+    if not np.isfinite(final) or final <= 0:
+        return None
+    cdf = cdf / final
+    return x, cdf
+
+
+def _build_tail_pdf_grid(
+    values: np.ndarray,
+    t_fact: float,
+    upper_bound: float,
+    config: TailSamplingConfig,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    adjusted = _apply_tail_config(values, config)
+    adjusted = adjusted[np.isfinite(adjusted) & (adjusted > 0)]
+    if adjusted.size < 2:
+        return None
+
+    tail_values = adjusted[adjusted > t_fact]
+    source = tail_values if tail_values.size >= 2 else adjusted
+
+    lower = max(float(t_fact) + 1e-6, float(np.min(source)))
+    upper = min(float(upper_bound), float(np.max(source if tail_values.size else adjusted)))
+    if config.clip_max is not None:
+        upper = min(upper, float(config.clip_max))
+    if upper <= lower:
+        upper = max(float(upper_bound), lower + 1.0)
+    if upper <= lower:
+        return None
+
+    x_values = np.linspace(lower, upper, _resolve_grid_size(config))
+
+    try:
+        if config.distribution == "empirical":
+            bins = min(24, max(6, source.size))
+            hist, edges = np.histogram(source, bins=bins, range=(lower, upper), density=True)
+            if np.all(hist <= 0):
+                return None
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            y_values = np.interp(x_values, centers, hist, left=0.0, right=0.0)
+        elif config.distribution == "kde":
+            if np.unique(source).size < 2:
+                return None
+            kde = gaussian_kde(source, bw_method=_resolve_kde_bandwidth(config))
+            y_values = kde(x_values)
+        elif config.distribution == "spline":
+            if np.unique(source).size < 4:
+                return None
+            bins = min(24, max(8, source.size // 2))
+            hist, edges = np.histogram(source, bins=bins, density=True)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            if np.all(hist <= 0):
+                return None
+            spline = UnivariateSpline(centers, hist, s=max(len(centers) * 0.001, 1e-6))
+            y_values = np.clip(spline(x_values), a_min=0.0, a_max=None)
+        else:
+            fit_source = tail_values if tail_values.size >= 2 else source
+            mean = float(np.mean(fit_source))
+            std = float(np.std(fit_source))
+            if not np.isfinite(std) or std <= 1e-9:
+                return None
+            y_values = norm.pdf(x_values, loc=mean, scale=std)
+    except Exception:
+        logger.exception("Tail PDF grid build failed for distribution=%s", config.distribution)
+        return None
+
+    normalized = _normalize_pdf_grid(x_values, y_values)
+    return normalized
+
+
+def _sample_from_tail_cdf_grid(
+    values: np.ndarray,
+    t_fact: float,
+    upper_bound: float,
+    rng: np.random.Generator,
+    config: TailSamplingConfig,
+) -> float | None:
+    adjusted = _apply_tail_config(values, config)
+    adjusted = adjusted[np.isfinite(adjusted) & (adjusted > 0)]
+    tail_values = adjusted[adjusted > t_fact]
+    if config.distribution == "empirical":
+        source = tail_values if tail_values.size else adjusted[adjusted > np.min(adjusted)]
+        if source.size == 0:
+            return None
+        sampled = float(rng.choice(source))
+        if sampled <= t_fact:
+            return None
+        return min(sampled, upper_bound)
+
+    grid = _build_tail_pdf_grid(values, t_fact, upper_bound, config)
+    if grid is None:
+        return None
+    x_values, y_values = grid
+    cdf_grid = _build_cdf_from_pdf(x_values, y_values)
+    if cdf_grid is None:
+        return None
+    x_grid, cdf = cdf_grid
+    sample_u = float(rng.uniform(0.0, 1.0))
+    sampled = float(np.interp(sample_u, cdf, x_grid))
+    if sampled <= t_fact:
+        return None
+    return min(sampled, upper_bound)
 
 
 def _sample_from_kde(values: np.ndarray, t_fact: float, upper_bound: float, rng: np.random.Generator, max_iter: int) -> float | None:
@@ -163,45 +316,54 @@ def _sample_from_normal(values: np.ndarray, t_fact: float, upper_bound: float, r
 def _build_fitted_density_curve(
     values: np.ndarray,
     config: TailSamplingConfig,
+    t_fact: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     adjusted = _apply_tail_config(values, config)
     if adjusted.size < 2:
         return None
 
-    lower = float(np.min(adjusted))
-    upper = float(np.max(adjusted))
-    if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
-        return None
+    if t_fact is None:
+        lower = float(np.min(adjusted))
+        upper = float(np.max(adjusted))
+        if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
+            return None
+        x_values = np.linspace(lower, upper, 240)
+        try:
+            if config.distribution == "empirical":
+                bins = min(24, max(6, adjusted.size // 2))
+                hist, edges = np.histogram(adjusted, bins=bins, density=True)
+                centers = 0.5 * (edges[:-1] + edges[1:])
+                if np.all(hist <= 0):
+                    return None
+                y_values = np.interp(x_values, centers, hist, left=0.0, right=0.0)
+            elif config.distribution == "kde":
+                if np.unique(adjusted).size < 2:
+                    return None
+                kde = gaussian_kde(adjusted, bw_method=_resolve_kde_bandwidth(config))
+                y_values = kde(x_values)
+            elif config.distribution == "spline":
+                if np.unique(adjusted).size < 4:
+                    return None
+                bins = min(24, max(8, adjusted.size // 2))
+                hist, edges = np.histogram(adjusted, bins=bins, density=True)
+                centers = 0.5 * (edges[:-1] + edges[1:])
+                if np.all(hist <= 0):
+                    return None
+                spline = UnivariateSpline(centers, hist, s=max(len(centers) * 0.001, 1e-6))
+                y_values = np.clip(spline(x_values), a_min=0.0, a_max=None)
+            else:
+                mean = float(np.mean(adjusted))
+                std = float(np.std(adjusted))
+                if std <= 1e-9:
+                    return None
+                y_values = norm.pdf(x_values, loc=mean, scale=std)
+        except Exception:
+            logger.exception("Tail diagnostic fit failed for distribution=%s", config.distribution)
+            return None
+        return _normalize_pdf_grid(x_values, np.asarray(y_values, dtype=float))
 
-    x_values = np.linspace(lower, upper, 240)
-
-    try:
-        if config.distribution == "kde":
-            if np.unique(adjusted).size < 2:
-                return None
-            kde = gaussian_kde(adjusted)
-            y_values = kde(x_values)
-        elif config.distribution == "spline":
-            if np.unique(adjusted).size < 4:
-                return None
-            bins = min(24, max(8, adjusted.size // 2))
-            hist, edges = np.histogram(adjusted, bins=bins, density=True)
-            centers = 0.5 * (edges[:-1] + edges[1:])
-            if np.all(hist <= 0):
-                return None
-            spline = UnivariateSpline(centers, hist, s=max(len(centers) * 0.001, 1e-6))
-            y_values = np.clip(spline(x_values), a_min=0.0, a_max=None)
-        else:
-            mean = float(np.mean(adjusted))
-            std = float(np.std(adjusted))
-            if std <= 1e-9:
-                return None
-            y_values = norm.pdf(x_values, loc=mean, scale=std)
-    except Exception:
-        logger.exception("Tail diagnostic fit failed for distribution=%s", config.distribution)
-        return None
-
-    return x_values, np.asarray(y_values, dtype=float)
+    upper = float(max(np.quantile(adjusted, TAIL_UPPER_QUANTILE), t_fact + 1.0))
+    return _build_tail_pdf_grid(adjusted, float(t_fact), upper, config)
 
 
 def sample_tail_runtime(
@@ -210,16 +372,22 @@ def sample_tail_runtime(
     random_state: int | None = None,
     min_group_size: int = 20,
     max_iter: int = 1000,
-    distribution: str = "kde",
+    distribution: str = "empirical",
     clip_min: float | None = None,
     clip_max: float | None = None,
     fit_to_fact: bool = True,
+    bandwidth_mode: str = "scott",
+    bandwidth_factor: float = 1.0,
+    grid_size: int = 256,
 ) -> float:
     config = TailSamplingConfig(
-        distribution=distribution if distribution in TAIL_DISTRIBUTIONS else "kde",
+        distribution=distribution if distribution in TAIL_DISTRIBUTIONS else "empirical",
         clip_min=clip_min,
         clip_max=clip_max,
         fit_to_fact=fit_to_fact,
+        bandwidth_mode=bandwidth_mode,
+        bandwidth_factor=bandwidth_factor,
+        grid_size=grid_size,
     )
     values = _apply_tail_config(_clean_runtime_values(group_values), config)
     rng = _build_rng(random_state)
@@ -232,19 +400,13 @@ def sample_tail_runtime(
         repeats = int(np.ceil(max(min_group_size, 2) / max(effective_values.size, 1)))
         effective_values = np.tile(effective_values, repeats)
 
-    tail_values = effective_values[effective_values > t_fact]
-    kde_source = tail_values if tail_values.size >= 2 else effective_values
-
-    sampled = None
-    if config.distribution == "kde":
-        try:
-            sampled = _sample_from_kde(kde_source, t_fact, upper_bound, rng, max_iter)
-        except Exception:
-            logger.exception("Tail KDE sampling failed, switching to fallback.")
-    elif config.distribution == "spline":
-        sampled = _sample_from_spline(kde_source, t_fact, upper_bound, rng, max_iter)
-    elif config.distribution == "normal":
-        sampled = _sample_from_normal(kde_source, t_fact, upper_bound, rng, max_iter)
+    sampled = _sample_from_tail_cdf_grid(
+        values=effective_values,
+        t_fact=t_fact,
+        upper_bound=upper_bound,
+        rng=rng,
+        config=config,
+    )
 
     if sampled is not None:
         return float(sampled)
@@ -263,10 +425,13 @@ def postprocess_runtime_prediction(
     random_state: int | None = None,
     min_group_size: int = DEFAULT_MIN_GROUP_SIZE,
     max_iter: int = DEFAULT_MAX_SAMPLING_ITER,
-    distribution: str = "kde",
+    distribution: str = "empirical",
     clip_min: float | None = None,
     clip_max: float | None = None,
     fit_to_fact: bool = True,
+    bandwidth_mode: str = "scott",
+    bandwidth_factor: float = 1.0,
+    grid_size: int = 256,
 ) -> float:
     if t_pred > t_fact:
         return float(t_pred)
@@ -280,29 +445,39 @@ def postprocess_runtime_prediction(
         clip_min=clip_min,
         clip_max=clip_max,
         fit_to_fact=fit_to_fact,
+        bandwidth_mode=bandwidth_mode,
+        bandwidth_factor=bandwidth_factor,
+        grid_size=grid_size,
     )
 
 
 def build_group_runtime_distribution(
     rows: list[dict],
     key_columns: dict[str, str | None],
-) -> tuple[dict[str, np.ndarray], np.ndarray]:
+) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, str]]:
     identifier_column = key_columns.get("identifier")
     runtime_column = key_columns.get("nno") or key_columns.get("runtime")
     if not identifier_column or not runtime_column:
-        return {}, np.array([], dtype=float)
+        return {}, np.array([], dtype=float), {}
 
     distributions: dict[str, list[float]] = {}
     all_values: list[float] = []
+    display_names: dict[str, str] = {}
     for row in rows:
-        group_key = normalize_text(row.get(identifier_column))
+        raw_group = stringify(row.get(identifier_column))
+        group_key = normalize_text(raw_group)
         runtime_value = to_float(row.get(runtime_column))
         if not group_key or runtime_value is None or runtime_value <= 0:
             continue
         distributions.setdefault(group_key, []).append(float(runtime_value))
         all_values.append(float(runtime_value))
+        display_names.setdefault(group_key, raw_group or group_key)
 
-    return {key: np.asarray(values, dtype=float) for key, values in distributions.items()}, np.asarray(all_values, dtype=float)
+    return (
+        {key: np.asarray(values, dtype=float) for key, values in distributions.items()},
+        np.asarray(all_values, dtype=float),
+        display_names,
+    )
 
 
 def sample_group_runtime_tail(
@@ -318,7 +493,7 @@ def sample_group_runtime_tail(
     group_values = _apply_tail_config(_clean_runtime_values(group_distributions.get(group_key, np.array([], dtype=float))), config)
     global_clean = _apply_tail_config(_clean_runtime_values(global_values), config)
     values_for_sampling = group_values
-    method = f"{config.distribution}_group_tail"
+    method = f"{config.distribution}_group_tail_cdf"
     fallback_used = False
 
     if values_for_sampling.size < min_group_size and global_clean.size:
@@ -326,9 +501,9 @@ def sample_group_runtime_tail(
         if config.fit_to_fact and group_values.size >= 2:
             values_for_sampling = _align_values_to_fact(group_values, global_clean)
             values_for_sampling = _apply_tail_config(values_for_sampling, config)
-            method = f"{config.distribution}_global_aligned_tail"
+            method = f"{config.distribution}_global_aligned_tail_cdf"
         else:
-            method = f"{config.distribution}_global_tail"
+            method = f"{config.distribution}_global_tail_cdf"
         fallback_used = True
 
     sampled = sample_tail_runtime(
@@ -341,6 +516,9 @@ def sample_group_runtime_tail(
         clip_min=config.clip_min,
         clip_max=config.clip_max,
         fit_to_fact=config.fit_to_fact,
+        bandwidth_mode=config.bandwidth_mode,
+        bandwidth_factor=config.bandwidth_factor,
+        grid_size=config.grid_size,
     )
     return sampled, method, fallback_used, int(values_for_sampling.size)
 
@@ -349,18 +527,20 @@ def build_tail_diagnostic_image(
     group_distributions: dict[str, np.ndarray],
     sampled_tail_values: dict[str, list[float]],
     config: TailSamplingConfig,
+    group_display_names: dict[str, str] | None = None,
 ) -> str | None:
     groups = [group for group, values in group_distributions.items() if values.size]
     if not groups:
         return None
 
-    groups = sorted(groups)[:9]
+    groups = sorted(groups)
     figure, axes = plt.subplots(len(groups), 1, figsize=(10, max(3.2 * len(groups), 4.0)), squeeze=False)
     axes_flat = axes.flatten()
 
     for axis, group in zip(axes_flat, groups):
         actual = group_distributions[group]
         sampled = np.asarray(sampled_tail_values.get(group, []), dtype=float)
+        t_fact_anchor = float(np.quantile(actual, 0.7)) if actual.size >= 3 else float(np.min(actual))
         axis.hist(
             actual,
             bins=min(16, max(actual.size // 2, 6)),
@@ -372,7 +552,7 @@ def build_tail_diagnostic_image(
             label="Actual histogram (Fact EPU)",
         )
 
-        fitted_curve = _build_fitted_density_curve(actual, config)
+        fitted_curve = _build_fitted_density_curve(actual, config, t_fact=t_fact_anchor)
         if fitted_curve is not None:
             x_values, y_values = fitted_curve
             axis.plot(
@@ -380,7 +560,7 @@ def build_tail_diagnostic_image(
                 y_values,
                 color="#60a5fa",
                 linewidth=2.4,
-                label=f"Fitted {config.distribution} curve",
+                label=f"Target tail pdf ({config.distribution})",
             )
 
         if sampled.size:
@@ -404,8 +584,33 @@ def build_tail_diagnostic_image(
                 label="Generated tail points",
                 zorder=4,
             )
+            if sampled.size >= 2:
+                sampled_density = _build_fitted_density_curve(
+                    sampled,
+                    TailSamplingConfig(
+                        distribution="kde",
+                        clip_min=config.clip_min,
+                        clip_max=config.clip_max,
+                        fit_to_fact=config.fit_to_fact,
+                        bandwidth_mode=config.bandwidth_mode,
+                        bandwidth_factor=config.bandwidth_factor,
+                        grid_size=config.grid_size,
+                    ),
+                )
+                if sampled_density is not None:
+                    sampled_x, sampled_y = sampled_density
+                    axis.plot(
+                        sampled_x,
+                        sampled_y,
+                        color="#22c55e",
+                        linewidth=1.8,
+                        linestyle="--",
+                        label="Sampled density",
+                    )
 
-        axis.set_title(group)
+        axis.axvline(t_fact_anchor, color="#f59e0b", linestyle=":", linewidth=1.5, label="Tail anchor")
+
+        axis.set_title((group_display_names or {}).get(group, group))
         axis.set_ylabel("Density")
         axis.legend(loc="upper right")
 
@@ -453,6 +658,9 @@ def build_preview_sampled_tail_values(
                 clip_min=config.clip_min,
                 clip_max=config.clip_max,
                 fit_to_fact=config.fit_to_fact,
+                bandwidth_mode=config.bandwidth_mode,
+                bandwidth_factor=config.bandwidth_factor,
+                grid_size=config.grid_size,
             )
             if sampled > float(t_fact):
                 sampled_group.append(float(sampled))
@@ -470,10 +678,13 @@ def build_tail_preview(
     random_state: int | None = DEFAULT_RANDOM_STATE,
     min_group_size: int = DEFAULT_MIN_GROUP_SIZE,
     max_sampling_iter: int = DEFAULT_MAX_SAMPLING_ITER,
-    tail_distribution: str = "kde",
+    tail_distribution: str = "empirical",
     tail_clip_min: float | None = None,
     tail_clip_max: float | None = None,
     tail_fit_to_fact: bool = True,
+    tail_bandwidth_mode: str = "scott",
+    tail_bandwidth_factor: float = 1.0,
+    tail_grid_size: int = 256,
 ) -> tuple[str | None, list[str]]:
     reference_dataset = tail_fact_dataset or fact_dataset
     prepared = prepare_dataset(reference_dataset)
@@ -481,15 +692,18 @@ def build_tail_preview(
         return None, ["В выбранном наборе Факт ЭПУ нет строк для построения диагностики."]
 
     key_columns = identify_key_columns(prepared.rows)
-    group_distributions, _ = build_group_runtime_distribution(prepared.rows, key_columns)
+    group_distributions, _, group_display_names = build_group_runtime_distribution(prepared.rows, key_columns)
     if not group_distributions:
         return None, ["В выбранном наборе Факт ЭПУ не найдены фактические значения ННО/наработки."]
 
     config = TailSamplingConfig(
-        distribution=tail_distribution if tail_distribution in TAIL_DISTRIBUTIONS else "kde",
+        distribution=tail_distribution if tail_distribution in TAIL_DISTRIBUTIONS else "empirical",
         clip_min=tail_clip_min,
         clip_max=tail_clip_max,
         fit_to_fact=tail_fit_to_fact,
+        bandwidth_mode=tail_bandwidth_mode,
+        bandwidth_factor=tail_bandwidth_factor,
+        grid_size=tail_grid_size,
     )
     sampled_tail_values, sampled_notes = build_preview_sampled_tail_values(
         group_distributions=group_distributions,
@@ -498,10 +712,16 @@ def build_tail_preview(
         max_sampling_iter=max_sampling_iter,
         config=config,
     )
-    image = build_tail_diagnostic_image(group_distributions, sampled_tail_values, config)
+    image = build_tail_diagnostic_image(
+        group_distributions,
+        sampled_tail_values,
+        config,
+        group_display_names=group_display_names,
+    )
     notes = [
         f"Preview dataset: {reference_dataset.name} (v{reference_dataset.storage_version})",
         f"Distribution: {config.distribution}",
+        f"Bandwidth: mode={config.bandwidth_mode}, factor={config.bandwidth_factor:.3f}, grid={config.grid_size}",
     ]
     notes.extend(sampled_notes[:6])
     return image, notes
@@ -726,19 +946,36 @@ def predict_single_row(trained: dict, row: dict) -> float | None:
 
 
 def calculate_first_failure_offset(
-    predicted_nno: float | None,
+    catboost_nno: float | None,
+    probabilistic_nno: float | None,
     actual_nno: float | None,
     runtime_days: float | None,
     base_failure_coefficient: float,
-) -> int:
-    del runtime_days
-    if predicted_nno is None:
-        return 1
-    if actual_nno is not None and predicted_nno > actual_nno:
-        return max(int(round(predicted_nno * base_failure_coefficient)), 1)
-    if actual_nno is not None and actual_nno >= predicted_nno:
-        return max(int(round(predicted_nno * max(base_failure_coefficient - 1, 0))), 1)
-    return max(int(round(predicted_nno * base_failure_coefficient)), 1)
+) -> tuple[int, float | None, str | None]:
+    del runtime_days, base_failure_coefficient
+    if catboost_nno is None and probabilistic_nno is None:
+        return 1, None, None
+
+    chosen_value = catboost_nno if catboost_nno is not None else probabilistic_nno
+    chosen_source = "catboost" if catboost_nno is not None else "probabilistic"
+
+    if actual_nno is not None:
+        if catboost_nno is not None and actual_nno < catboost_nno:
+            chosen_value = catboost_nno
+            chosen_source = "catboost"
+        elif probabilistic_nno is not None and catboost_nno is not None and actual_nno >= catboost_nno:
+            chosen_value = probabilistic_nno
+            chosen_source = "probabilistic"
+        elif probabilistic_nno is not None and chosen_value is None:
+            chosen_value = probabilistic_nno
+            chosen_source = "probabilistic"
+
+        if chosen_value is not None:
+            return max(int(round(chosen_value - actual_nno)), 1), chosen_value, chosen_source
+
+    if chosen_value is None:
+        return 1, None, None
+    return max(int(round(chosen_value)), 1), chosen_value, chosen_source
 
 
 def align_to_forecast_date(target: date, forecast_dates: list[date]) -> date | None:
@@ -762,7 +999,8 @@ def prediction_for_date(predictions: list[tuple[date, float | None]], target_dat
 
 def build_statuses_for_well(
     forecast_dates: list[date],
-    prediction_series: list[tuple[date, float | None]],
+    catboost_series: list[tuple[date, float | None]],
+    probabilistic_series: list[tuple[date, float | None]],
     actual_nno: float | None,
     runtime_days: float | None,
     base_failure_coefficient: float,
@@ -771,25 +1009,28 @@ def build_statuses_for_well(
         return [], [], []
 
     statuses = [1] * len(forecast_dates)
-    if not prediction_series:
+    if not catboost_series:
         return statuses, [], []
 
-    first_prediction = prediction_series[0][1]
-    if first_prediction is None:
+    first_catboost_prediction = catboost_series[0][1]
+    first_probabilistic_prediction = (
+        probabilistic_series[0][1] if probabilistic_series else first_catboost_prediction
+    )
+    if first_catboost_prediction is None and first_probabilistic_prediction is None:
         return statuses, [], []
 
     event_dates: list[str] = []
     event_nnos: list[tuple[date, float]] = []
     date_index = {item: index for index, item in enumerate(forecast_dates)}
     current_anchor = forecast_dates[0]
-    next_failure = current_anchor + timedelta(
-        days=calculate_first_failure_offset(
-            first_prediction,
-            actual_nno,
-            runtime_days,
-            base_failure_coefficient,
-        )
+    first_failure_offset, first_used_prediction, _ = calculate_first_failure_offset(
+        first_catboost_prediction,
+        first_probabilistic_prediction,
+        actual_nno,
+        runtime_days,
+        base_failure_coefficient,
     )
+    next_failure = current_anchor + timedelta(days=first_failure_offset)
 
     while next_failure <= forecast_dates[-1]:
         aligned = align_to_forecast_date(next_failure, forecast_dates)
@@ -800,7 +1041,7 @@ def build_statuses_for_well(
         statuses[index] = 0
         event_dates.append(aligned.isoformat())
 
-        next_prediction = prediction_for_date(prediction_series, aligned)
+        next_prediction = first_used_prediction if not event_nnos else prediction_for_date(catboost_series, aligned)
         if next_prediction is None:
             break
         event_nnos.append((aligned, next_prediction))
@@ -825,10 +1066,13 @@ def build_repair_forecast(
     random_state: int | None = DEFAULT_RANDOM_STATE,
     min_group_size: int = DEFAULT_MIN_GROUP_SIZE,
     max_sampling_iter: int = DEFAULT_MAX_SAMPLING_ITER,
-    tail_distribution: str = "kde",
+    tail_distribution: str = "empirical",
     tail_clip_min: float | None = None,
     tail_clip_max: float | None = None,
     tail_fit_to_fact: bool = True,
+    tail_bandwidth_mode: str = "scott",
+    tail_bandwidth_factor: float = 1.0,
+    tail_grid_size: int = 256,
 ) -> RepairForecastResponse:
     del db, nominal_gap_coefficient
 
@@ -877,12 +1121,18 @@ def build_repair_forecast(
 
     fact_latest_by_key = best_latest_rows(fact_prepared.rows, fact_keys)
     identifier_stats = build_identifier_stats(fact_prepared.rows, fact_keys, trained["feature_columns"])
-    group_distributions, global_runtime_values = build_group_runtime_distribution(tail_fact_prepared.rows, tail_fact_keys)
+    group_distributions, global_runtime_values, group_display_names = build_group_runtime_distribution(
+        tail_fact_prepared.rows,
+        tail_fact_keys,
+    )
     tail_config = TailSamplingConfig(
-        distribution=tail_distribution if tail_distribution in TAIL_DISTRIBUTIONS else "kde",
+        distribution=tail_distribution if tail_distribution in TAIL_DISTRIBUTIONS else "empirical",
         clip_min=tail_clip_min,
         clip_max=tail_clip_max,
         fit_to_fact=tail_fit_to_fact,
+        bandwidth_mode=tail_bandwidth_mode,
+        bandwidth_factor=tail_bandwidth_factor,
+        grid_size=tail_grid_size,
     )
 
     available_columns = {column for row in source_prepared.rows for column in row.keys()}
@@ -903,6 +1153,10 @@ def build_repair_forecast(
         first_row = items[0][1]
         fact_row = find_matching_fact_row(first_row, source_keys, fact_latest_by_key)
         prediction_series: list[tuple[date, float | None]] = []
+        catboost_time_series: list[tuple[date, float | None]] = []
+        probabilistic_time_series: list[tuple[date, float | None]] = []
+        catboost_prediction_series: list[float] = []
+        probabilistic_prediction_series: list[float] = []
         actual_nno = None
         runtime_days = None
         group_key = normalize_text(first_row.get(identifier_column))
@@ -966,6 +1220,12 @@ def build_repair_forecast(
                     float(final_prediction),
                 )
 
+            if raw_prediction is not None:
+                catboost_prediction_series.append(float(raw_prediction))
+            if final_prediction is not None:
+                probabilistic_prediction_series.append(float(final_prediction))
+            catboost_time_series.append((row_date, float(raw_prediction) if raw_prediction is not None else None))
+            probabilistic_time_series.append((row_date, float(final_prediction) if final_prediction is not None else None))
             prediction_series.append((row_date, final_prediction))
 
         if actual_nno is None and fact_row and fact_keys.get("nno"):
@@ -975,7 +1235,8 @@ def build_repair_forecast(
 
         statuses, event_dates, event_nnos = build_statuses_for_well(
             forecast_dates,
-            prediction_series,
+            catboost_time_series,
+            probabilistic_time_series,
             actual_nno,
             runtime_days,
             base_failure_coefficient,
@@ -989,6 +1250,20 @@ def build_repair_forecast(
 
         predicted_values = [value for _, value in prediction_series if value is not None]
         average_prediction = float(sum(predicted_values) / len(predicted_values)) if predicted_values else None
+        average_catboost_prediction = (
+            float(sum(catboost_prediction_series) / len(catboost_prediction_series)) if catboost_prediction_series else None
+        )
+        average_probabilistic_prediction = (
+            float(sum(probabilistic_prediction_series) / len(probabilistic_prediction_series))
+            if probabilistic_prediction_series
+            else None
+        )
+        used_prediction_source = "probabilistic"
+        if average_catboost_prediction is not None and average_probabilistic_prediction is not None:
+            if abs(average_catboost_prediction - average_probabilistic_prediction) <= 1e-9:
+                used_prediction_source = "catboost"
+        elif average_catboost_prediction is not None:
+            used_prediction_source = "catboost"
 
         first_liquid_rate = to_float(first_row.get(liquid_rate_column)) if liquid_rate_column else None
         category = "База" if first_liquid_rate is not None and first_liquid_rate > 0 else "ВНС"
@@ -1000,7 +1275,10 @@ def build_repair_forecast(
                 license_area=stringify(first_row.get(identifier_column)),
                 cluster_name=stringify(first_row.get(source_keys["cluster"])) if source_keys.get("cluster") else None,
                 well_name=stringify(first_row.get(well_column)) or "Неизвестная скважина",
+                catboost_nno=average_catboost_prediction,
+                probabilistic_nno=average_probabilistic_prediction,
                 predicted_nno=average_prediction,
+                used_prediction_source=used_prediction_source,
                 actual_nno=actual_nno,
                 runtime_days=runtime_days,
                 event_dates=event_dates,
@@ -1021,7 +1299,10 @@ def build_repair_forecast(
         f"distribution={tail_config.distribution}, "
         f"clip_min={tail_config.clip_min if tail_config.clip_min is not None else 'auto'}, "
         f"clip_max={tail_config.clip_max if tail_config.clip_max is not None else 'auto'}, "
-        f"fit_to_fact={'yes' if tail_config.fit_to_fact else 'no'}."
+        f"fit_to_fact={'yes' if tail_config.fit_to_fact else 'no'}, "
+        f"bandwidth_mode={tail_config.bandwidth_mode}, "
+        f"bandwidth_factor={tail_config.bandwidth_factor:.3f}, "
+        f"grid_size={tail_config.grid_size}."
     )
     if not monthly_summary_map:
         notes.append("В расчетном горизонте не возникло прогнозных отказов, поэтому месячная диаграмма показывает ноль.")
@@ -1046,7 +1327,12 @@ def build_repair_forecast(
         )
         for month, values in sorted(monthly_summary_map.items())
     ]
-    tail_diagnostic_image = build_tail_diagnostic_image(group_distributions, sampled_tail_values, tail_config)
+    tail_diagnostic_image = build_tail_diagnostic_image(
+        group_distributions,
+        sampled_tail_values,
+        tail_config,
+        group_display_names=group_display_names,
+    )
 
     return RepairForecastResponse(
         start_date=today.isoformat(),

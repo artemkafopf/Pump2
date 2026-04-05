@@ -256,10 +256,13 @@ class RepairForecastRequest(BaseModel):
     random_state: int | None = 42
     min_group_size: int = 20
     max_sampling_iter: int = 1000
-    tail_distribution: str = "kde"
+    tail_distribution: str = "empirical"
     tail_clip_min: float | None = None
     tail_clip_max: float | None = None
     tail_fit_to_fact: bool = True
+    tail_bandwidth_mode: str = "scott"
+    tail_bandwidth_factor: float = 1.0
+    tail_grid_size: int = 256
 
 
 class RepairTailPreviewRequest(BaseModel):
@@ -267,10 +270,13 @@ class RepairTailPreviewRequest(BaseModel):
     random_state: int | None = 42
     min_group_size: int = 20
     max_sampling_iter: int = 1000
-    tail_distribution: str = "kde"
+    tail_distribution: str = "empirical"
     tail_clip_min: float | None = None
     tail_clip_max: float | None = None
     tail_fit_to_fact: bool = True
+    tail_bandwidth_mode: str = "scott"
+    tail_bandwidth_factor: float = 1.0
+    tail_grid_size: int = 256
 
 
 class RepairTailPreviewResponse(BaseModel):
@@ -289,10 +295,13 @@ class SaveRepairForecastRequest(BaseModel):
     random_state: int | None = 42
     min_group_size: int = 20
     max_sampling_iter: int = 1000
-    tail_distribution: str = "kde"
+    tail_distribution: str = "empirical"
     tail_clip_min: float | None = None
     tail_clip_max: float | None = None
     tail_fit_to_fact: bool = True
+    tail_bandwidth_mode: str = "scott"
+    tail_bandwidth_factor: float = 1.0
+    tail_grid_size: int = 256
     result: "RepairForecastResponse"
 
 
@@ -307,7 +316,10 @@ class RepairForecastRow(BaseModel):
     license_area: str | None = None
     cluster_name: str | None = None
     well_name: str
+    catboost_nno: float | None = None
+    probabilistic_nno: float | None = None
     predicted_nno: float | None = None
+    used_prediction_source: str | None = None
     actual_nno: float | None = None
     runtime_days: float | None = None
     event_dates: list[str] = []
@@ -361,10 +373,13 @@ class RepairForecastCalculationSettings(BaseModel):
     random_state: int | None = 42
     min_group_size: int = 20
     max_sampling_iter: int = 1000
-    tail_distribution: str = "kde"
+    tail_distribution: str = "empirical"
     tail_clip_min: float | None = None
     tail_clip_max: float | None = None
     tail_fit_to_fact: bool = True
+    tail_bandwidth_mode: str = "scott"
+    tail_bandwidth_factor: float = 1.0
+    tail_grid_size: int = 256
 
 
 class RepairForecastCalculationDetail(BaseModel):
