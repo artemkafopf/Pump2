@@ -21,6 +21,5 @@ docker compose up --build
 
 3. Open:
 
-- Frontend: `http://localhost:5173`
-- Backend docs: `http://localhost:8000/docs`
-
+- Frontend: `http://localhost:5174`
+- Backend docs: `http://localhost:8001/docs`
