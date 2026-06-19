@@ -7,3 +7,12 @@ backend/.venv/
 frontend/node_modules/
 frontend/dist/
 
+# Local/source data: never commit project inputs or mirrored databases.
+data/
+
+# Generated analysis artifacts can still contain sensitive source-derived data.
+analysis_outputs/
+
+# Temporary extraction / scratch work.
+.tmp/
+
