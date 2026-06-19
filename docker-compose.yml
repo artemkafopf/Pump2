@@ -51,6 +51,15 @@ services:
     ports:
       - "${FRONTEND_PORT:-5174}:80"
 
+  streamlit:
+    build:
+      context: .
+      dockerfile: streamlit_apps/Dockerfile
+    container_name: excel-analysis-streamlit
+    restart: unless-stopped
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+
   ollama:
     image: ollama/ollama:latest
     container_name: excel-analysis-ollama
