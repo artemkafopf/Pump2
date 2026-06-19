@@ -16,9 +16,7 @@ for path_text in (str(REPO_ROOT), str(BACKEND_DIR)):
     if path_text not in sys.path:
         sys.path.insert(0, path_text)
 
-from analysis.input_paths import resolve_v03_all_path
-from scripts.analyze_failure_horizon import load_runs
-from scripts.data_utils import add_dynamic_salt_proxies, load_daily_merged
+from scripts.db import WAREHOUSE_PATH, get_warehouse_conn, get_last_pipeline_run
 
 
 st.set_page_config(
@@ -35,7 +33,6 @@ DEFAULT_GLF_BOUNDARIES_TEXT = "100, 300, 500, 1000"
 DEFAULT_KPOD_BOUNDARIES_TEXT = "0.3, 0.5, 0.7, 1.0"
 DEFAULT_KPOD_FREQ_BOUNDARIES_TEXT = "0.3, 0.5, 0.7, 1.0"
 DEFAULT_PRECIPITATE_PROXY_BOUNDARIES_TEXT = "1000, 5000, 10000, 50000"
-TTF_TRUE_CSV_PATH = REPO_ROOT / "analysis_outputs" / "ttf_true_analysis" / "ttf_true_comparison_by_run.csv"
 
 
 def parse_boundaries(text: str) -> list[float]:
@@ -96,110 +93,67 @@ def kaplan_meier(durations: np.ndarray, events: np.ndarray) -> tuple[np.ndarray,
     return times, survival
 
 
-@st.cache_data(show_spinner=False)
-def load_all_runs() -> pd.DataFrame:
-    return load_runs(resolve_v03_all_path())
+@st.cache_resource
+def _warehouse_conn():
+    """Cached warehouse connection (one per Streamlit session)."""
+    if not WAREHOUSE_PATH.exists():
+        return None
+    return get_warehouse_conn()
 
 
-@st.cache_data(show_spinner=False)
-def load_ttf_true_frame() -> pd.DataFrame:
-    if not TTF_TRUE_CSV_PATH.exists():
-        return pd.DataFrame(columns=["row_id", "ttf_true_best_days", "ttf_true_source", "ttf_tele_days", "ttf_treg_days"])
-    df = pd.read_csv(TTF_TRUE_CSV_PATH)
-    keep = [column for column in ["row_id", "ttf_true_best_days", "ttf_true_source", "ttf_tele_days", "ttf_treg_days"] if column in df.columns]
-    return df[keep].copy()
-
-
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def load_run_stats(field_code: str) -> pd.DataFrame:
-    runs = load_all_runs().copy()
-    ttf_true = load_ttf_true_frame()
-    if not ttf_true.empty and "row_id" in runs.columns:
-        runs = runs.merge(ttf_true, on="row_id", how="left")
+    """Load pre-computed run stats from mart__vt_freq55 in the warehouse.
+
+    Falls back to an empty DataFrame if the warehouse is not built yet.
+    Column names are normalized to the legacy names used by the rest of this app.
+    """
+    conn = _warehouse_conn()
+    if conn is None:
+        st.warning("Warehouse not found. Run `python scripts/pipeline.py` to build it.")
+        return pd.DataFrame()
+
+    try:
+        df = pd.read_sql("SELECT * FROM mart__vt_freq55", conn, parse_dates=["install_date", "stop_date"])
+    except Exception as exc:
+        st.warning(f"mart__vt_freq55 not available yet: {exc}. Run the pipeline first.")
+        return pd.DataFrame()
+
     if field_code != "GLOBAL":
-        runs = runs.loc[runs["Месторождение"].astype("string").str.strip() == field_code].copy()
-    wells = runs["Скв."].dropna().astype(str).unique().tolist()
-    daily = load_daily_merged(wells)
-    daily = add_dynamic_salt_proxies(daily, qliq_column="qliq", fill_mode="step", extend_backward=True)
-    working_daily = daily.copy()
-    working_daily["well_key"] = working_daily["well_id"].astype("string").str.strip().str.casefold()
+        df = df.loc[df["field"].astype("string").str.strip() == field_code].copy()
 
-    rows: list[dict[str, object]] = []
-    for _, run in runs.iterrows():
-        install = pd.Timestamp(run["Дата монтажа"])
-        stop = pd.Timestamp(run["Дата остановки"])
-        well_key = str(run["Скв."]).strip().casefold()
-        run_daily = working_daily.loc[
-            (working_daily["well_key"] == well_key)
-            & (working_daily["dt"] >= install)
-            & (working_daily["dt"] <= stop)
-        ].copy()
-        freq = pd.to_numeric(run_daily["freq"], errors="coerce")
-        valid_mask = freq.notna() & (freq > 0)
-        n_valid = int(valid_mask.sum())
-        valid_freq = freq.loc[valid_mask]
-        n_above = int((valid_freq > FREQ_THRESHOLD_HZ).sum()) if n_valid > 0 else 0
-        n_below = int((valid_freq < LOW_FREQ_THRESHOLD_HZ).sum()) if n_valid > 0 else 0
-        frac_above = (n_above / n_valid) if n_valid >= MIN_FREQ_DAYS else float("nan")
-        frac_below = (n_below / n_valid) if n_valid >= MIN_FREQ_DAYS else float("nan")
-        signed_exposure = (frac_above - frac_below) if n_valid >= MIN_FREQ_DAYS else float("nan")
-        avg_freq = float(valid_freq.mean()) if n_valid >= MIN_FREQ_DAYS else float("nan")
+    # Normalize warehouse column names → legacy names used by the rest of this file.
+    # avg_glf and avg_kpod come directly from feat__run_freq_exposure (whole-run means).
+    # kpod_m_mean and glf_m_mean from feat__run_mature are kept under their original names
+    # for reference but are NOT mapped to avg_glf/avg_kpod.
+    df = df.rename(columns={
+        "well": "well_id",
+        "install_date": "mount_date",
+        "run_days": "ttf_days",
+        "freq_above_55hz_pct": "frac_freq_above_55",
+        "freq_below_45hz_pct": "frac_freq_below_45",
+        "freq_signed_exposure": "signed_freq_exposure",
+        "freq_w_mean": "avg_freq_hz",
+        "n_freq_valid_days": "n_freq_days",
+        "n_freq_above_55hz": "n_freq_days_above_55",
+        "n_freq_below_45hz": "n_freq_days_below_45",
+        "total_liquid_m3": "tlf_total_liquid_m3",
+        "total_freq_hz_days": "trf_total_frequency_hz_days",
+        "cum_salt_load_kg": "salt_proxy_total_kg",
+    })
 
-        qliq = pd.to_numeric(run_daily["qliq"], errors="coerce")
-        glf = pd.to_numeric(run_daily["gas_factor"], errors="coerce")
-        nominal_rate = pd.to_numeric(pd.Series([run.get("Ном. Произв. м₃/сут")]), errors="coerce").iloc[0]
-        nominal_freq = pd.to_numeric(pd.Series([run.get("Номинальная частота, Гц")]), errors="coerce").iloc[0]
-        avg_glf = float(glf[glf.notna()].mean()) if glf.notna().any() else float("nan")
-        valid_qliq = qliq.notna() & (qliq >= 0)
-        total_liquid_to_failure = float(qliq.loc[valid_qliq].sum()) if valid_qliq.any() else float("nan")
-        total_frequency_to_failure = float(valid_freq.sum()) if n_valid > 0 else float("nan")
-        total_salt_proxy = float(pd.to_numeric(run_daily["daily_salt_load_kg"], errors="coerce").sum(min_count=1)) if "daily_salt_load_kg" in run_daily.columns else float("nan")
-        avg_kpod = float("nan")
-        avg_kpod_freq = float("nan")
-        if n_valid >= MIN_FREQ_DAYS and pd.notna(nominal_rate) and abs(float(nominal_rate)) > 1e-12:
-            kpod_daily = qliq / float(nominal_rate)
-            valid_kpod = kpod_daily.notna()
-            if valid_kpod.any():
-                avg_kpod = float(kpod_daily[valid_kpod].mean())
-            if pd.notna(nominal_freq):
-                valid_kpod_freq = valid_kpod & valid_mask
-                if valid_kpod_freq.any():
-                    kpod_freq_daily = kpod_daily[valid_kpod_freq] * (float(nominal_freq) / freq[valid_kpod_freq])
-                    avg_kpod_freq = float(kpod_freq_daily.mean())
+    # avg_kpod_freq not stored in mart; leave as NaN placeholder.
+    if "avg_kpod_freq" not in df.columns:
+        df["avg_kpod_freq"] = float("nan")
 
-        rows.append(
-            {
-                "row_id": int(run["row_id"]),
-                "well_id": str(run["Скв."]).strip(),
-                "field": run.get("Месторождение"),
-                "contractor": run.get("Принадлежность"),
-                "failed_node": run.get("Отказавший узел"),
-                "mount_date": install,
-                "stop_date": stop,
-                "mount_year": int(install.year),
-                "ttf_days": float(run["run_days"]),
-                "ttf_true_best_days": pd.to_numeric(pd.Series([run.get("ttf_true_best_days")]), errors="coerce").iloc[0],
-                "ttf_true_source": run.get("ttf_true_source"),
-                "ttf_tele_days": pd.to_numeric(pd.Series([run.get("ttf_tele_days")]), errors="coerce").iloc[0],
-                "ttf_treg_days": pd.to_numeric(pd.Series([run.get("ttf_treg_days")]), errors="coerce").iloc[0],
-                "tlf_total_liquid_m3": total_liquid_to_failure,
-                "trf_total_frequency_hz_days": total_frequency_to_failure,
-                "salt_proxy_total_kg": total_salt_proxy,
-                "event": int(run["event"]),
-                "frac_freq_above_55": frac_above,
-                "frac_freq_below_45": frac_below,
-                "signed_freq_exposure": signed_exposure,
-                "avg_freq_hz": avg_freq,
-                "avg_glf": avg_glf,
-                "avg_kpod": avg_kpod,
-                "avg_kpod_freq": avg_kpod_freq,
-                "n_freq_days": n_valid,
-                "n_freq_days_above_55": n_above,
-                "n_freq_days_below_45": n_below,
-            }
-        )
-    result = pd.DataFrame(rows)
-    return result
+    # salt_proxy_total_kg fallback: use integrated_salt_proxy_m if cum column missing.
+    if "salt_proxy_total_kg" not in df.columns and "integrated_salt_proxy_m" in df.columns:
+        df["salt_proxy_total_kg"] = df["integrated_salt_proxy_m"]
+
+    if "mount_date" in df.columns:
+        df["mount_year"] = pd.to_datetime(df["mount_date"], errors="coerce").dt.year.astype("Int64")
+
+    return df.reset_index(drop=True)
 
 
 def filtered_view(
@@ -549,10 +503,33 @@ def main() -> None:
     st.caption("Simple local GUI for checking frequency-exposure histograms globally or by field.")
     st.info("Signed exposure is defined as `y = share(time > 55 Hz) - share(time < 45 Hz)`. Positive y means more high-frequency exposure; negative y means more low-frequency exposure.")
 
-    all_runs = load_all_runs()
-    fields = sorted(all_runs["Месторождение"].astype("string").dropna().str.strip().unique().tolist())
-    year_min = int(all_runs["Дата монтажа"].dt.year.min())
-    year_max = int(all_runs["Дата монтажа"].dt.year.max())
+    # Show warehouse freshness in the sidebar.
+    conn = _warehouse_conn()
+    if conn is not None:
+        last = get_last_pipeline_run("mart__vt_freq55", conn=conn)
+        if last:
+            st.sidebar.caption(f"Data last built: {last['run_at']} ({last['row_count']:,} runs)")
+        else:
+            st.sidebar.warning("Warehouse exists but mart__vt_freq55 not built yet. Run `python scripts/pipeline.py`.")
+    else:
+        st.sidebar.error("Warehouse not found. Run `python scripts/pipeline.py --step ingest` to start.")
+
+    # Load field list from warehouse for the filter dropdown.
+    fields: list[str] = []
+    year_min, year_max = 2010, 2025
+    if conn is not None:
+        try:
+            meta = pd.read_sql(
+                "SELECT DISTINCT field, strftime('%Y', install_date) AS yr FROM raw__v03_runs WHERE field IS NOT NULL",
+                conn,
+            )
+            fields = sorted(meta["field"].dropna().astype(str).str.strip().unique().tolist())
+            valid_years = pd.to_numeric(meta["yr"], errors="coerce").dropna()
+            if not valid_years.empty:
+                year_min = int(valid_years.min())
+                year_max = int(valid_years.max())
+        except Exception:
+            pass
 
     with st.sidebar:
         st.subheader("Filters")
@@ -596,9 +573,12 @@ def main() -> None:
 
     with st.sidebar:
         selected_failed_nodes = st.multiselect("Keep failed nodes", failed_node_labels, default=failed_node_labels)
-        selected_glf_bins = st.multiselect("Keep GLF bins", glf_labels, default=glf_labels)
-        selected_kpod_bins = st.multiselect("Keep Kpod bins", kpod_labels, default=kpod_labels)
-        selected_kpod_freq_bins = st.multiselect("Keep Kpod_freq bins", kpod_freq_labels, default=kpod_freq_labels)
+        glf_options = glf_labels + ["<missing>"]
+        selected_glf_bins = st.multiselect("Keep GLF bins", glf_options, default=glf_options)
+        kpod_options = kpod_labels + ["<missing>"]
+        selected_kpod_bins = st.multiselect("Keep Kpod bins", kpod_options, default=kpod_options)
+        kpod_freq_options = kpod_freq_labels + ["<missing>"]
+        selected_kpod_freq_bins = st.multiselect("Keep Kpod_freq bins", kpod_freq_options, default=kpod_freq_options)
 
     view = filtered_view(
         stats,
