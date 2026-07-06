@@ -23,14 +23,14 @@ for p in (str(REPO_ROOT), str(BACKEND_DIR)):
         sys.path.insert(0, p)
 
 from analysis.input_paths import resolve_v03_all_path
+from analysis.paths import results_dir
 from scripts.analyze_failure_horizon import load_runs
 from scripts.data_utils import load_daily_merged
 
 FREQ_THRESHOLD_HZ = 55.0
 FIELD_CODE = "Vt"
-OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "vt_ttf_freq55"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
+_SLUG = "vt_ttf_vs_freq55"
+OUTPUT_DIR = results_dir(_SLUG)
 
 def compute_freq_share(runs: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
     daily = daily.copy()
@@ -66,7 +66,6 @@ def compute_freq_share(runs: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
         })
 
     return pd.DataFrame(records)
-
 
 def main() -> None:
     runs = load_runs(resolve_v03_all_path())
@@ -193,7 +192,6 @@ def main() -> None:
         f = int(grp["event"].eq(1).sum())
         c = int(grp["event"].eq(0).sum())
         print(f"  {yr}: {f} failures, {c} censored")
-
 
 if __name__ == "__main__":
     main()

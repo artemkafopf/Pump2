@@ -16,8 +16,8 @@ for path_text in (str(REPO_ROOT), str(BACKEND_DIR)):
         sys.path.insert(0, path_text)
 
 from analysis.stress_transforms import apply_transform
+from analysis.paths import results_dir
 from scripts.analyze_vt_60hz_scenario import (
-    DEFAULT_OUTPUT_DIR as DEFAULT_SCENARIO_DIR,
     LOAD_MEAN_RESPONSE_FEATURES,
     LOAD_STD_RESPONSE_FEATURES,
     PRESSURE_RESPONSE_FEATURES,
@@ -36,7 +36,7 @@ from scripts.analyze_vt_60hz_scenario import (
 )
 
 
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "vt_60hz_scenario_phase1_decomposition"
+_SLUG = "vt_60hz_weibull_decompose"
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--field", default="Vt", help="Field code.")
     parser.add_argument("--scenario-frequency", type=float, default=60.0, help="Scenario frequency in Hz.")
     parser.add_argument("--portfolio-cutoff", default="2025-01-01", help="Latest portfolio cutoff date.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory.")
+    parser.add_argument("--output-dir", default=None, help="Output directory.")
     return parser.parse_args()
 
 
@@ -87,7 +87,7 @@ def summarize_direction(series: pd.Series) -> dict[str, float]:
 
 def main() -> None:
     args = parse_args()
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else results_dir(_SLUG)
     output_dir.mkdir(parents=True, exist_ok=True)
     cutoff_date = pd.Timestamp(args.portfolio_cutoff)
 

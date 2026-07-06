@@ -34,6 +34,7 @@ except ModuleNotFoundError:  # pragma: no cover
 from analysis.transform_selection import rank_transform_candidates
 from analysis.weibull_model import fit_weibull_stress_model
 from analysis.sqlite_paths import resolve_telemetry_db_path
+from analysis.paths import results_dir
 from scripts.data_utils import split_by_run_id
 from scripts.analyze_failure_horizon import (
     ALL_PATH,
@@ -47,7 +48,7 @@ from scripts.analyze_failure_horizon import (
 )
 
 
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "vt_60hz_scenario_2026_06_18"
+_SLUG = "vt_60hz_scenario"
 TELEMETRY_DB_PATH = resolve_telemetry_db_path()
 
 TELEMETRY_RAW_QUERY_COLUMNS = {
@@ -1270,13 +1271,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--field", default="Vt", help="Field code to analyze.")
     parser.add_argument("--scenario-frequency", type=float, default=60.0, help="Scenario frequency in Hz.")
     parser.add_argument("--portfolio-cutoff", default="2025-01-01", help="Keep the latest portfolio window per well on or after this date.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for markdown and CSV outputs.")
+    parser.add_argument("--output-dir", default=None, help="Directory for markdown and CSV outputs.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else results_dir(_SLUG)
     ensure_output_dir(output_dir)
     cutoff_date = pd.Timestamp(args.portfolio_cutoff)
 

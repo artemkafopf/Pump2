@@ -27,7 +27,6 @@ import pandas as pd
 from scipy.optimize import minimize
 from scipy.stats import spearmanr, norm as _norm
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_DIR = REPO_ROOT / "backend"
 for _p in (str(REPO_ROOT), str(BACKEND_DIR)):
@@ -35,9 +34,9 @@ for _p in (str(REPO_ROOT), str(BACKEND_DIR)):
         sys.path.insert(0, _p)
 
 from analysis.input_paths import resolve_v03_all_path
+from analysis.paths import results_dir
 from scripts.analyze_failure_horizon import load_runs
 from scripts.data_utils import load_daily_merged
-
 
 YEAR0 = 2022
 FREQ_HIGH_HZ = 55.0
@@ -45,9 +44,8 @@ FREQ_LOW_HZ = 45.0
 MIN_FREQ_DAYS = 7
 MIN_COX_EVENTS = 5      # minimum failures for Cox to be meaningful
 
-OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "all_fields_freq_exposure"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
+_SLUG = "all_fields_freq_exposure"
+OUTPUT_DIR = results_dir(_SLUG)
 
 # ---------------------------------------------------------------------------
 # Frequency metric computation
@@ -91,7 +89,6 @@ def compute_freq_metrics(runs: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFram
         })
     return pd.DataFrame(rows)
 
-
 # ---------------------------------------------------------------------------
 # Cox PH (univariate, scalar covariate)  — partial likelihood via BFGS
 # ---------------------------------------------------------------------------
@@ -112,7 +109,6 @@ def _cox_neg_log_partial_likelihood(beta: np.ndarray, t: np.ndarray, e: np.ndarr
         log_pl += xb[i] - xb.max() - np.log(exp_xb[risk_mask].sum())
     return -log_pl
 
-
 def _cox_hessian_diag(beta: np.ndarray, t: np.ndarray, e: np.ndarray, x: np.ndarray) -> float:
     """Diagonal of the observed information matrix (scalar covariate)."""
     order = np.argsort(t)
@@ -131,7 +127,6 @@ def _cox_hessian_diag(beta: np.ndarray, t: np.ndarray, e: np.ndarray, x: np.ndar
         denom = w.sum()
         info += wx2.sum() / denom - (wx.sum() / denom) ** 2
     return float(info)
-
 
 def cox_univariate(
     t: np.ndarray,
@@ -193,14 +188,12 @@ def cox_univariate(
         n_events=n_events,
     )
 
-
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
 
 C_CENSORED = "#4878CF"
 C_FAILURE  = "#C44E52"
-
 
 def _spearman_str(x: pd.Series, y: pd.Series) -> str:
     mask = x.notna() & y.notna()
@@ -209,7 +202,6 @@ def _spearman_str(x: pd.Series, y: pd.Series) -> str:
     rho, pval = spearmanr(x[mask], y[mask])
     star = "*" if pval < 0.05 else ""
     return f"ρ = {rho:+.2f}{star}  p={pval:.3f}"
-
 
 def _panel(ax: plt.Axes, df: pd.DataFrame, y_col: str, title: str, ylabel: str) -> None:
     df = df.loc[df[y_col].notna()].copy()
@@ -234,7 +226,6 @@ def _panel(ax: plt.Axes, df: pd.DataFrame, y_col: str, title: str, ylabel: str) 
     ax.grid(True, alpha=0.18, linewidth=0.5)
     ax.legend(fontsize=7.5, loc="upper right")
 
-
 def _cox_annotation(ax: plt.Axes, cox: dict, metric_label: str) -> None:
     if np.isnan(cox["hr"]):
         text = f"Cox {metric_label}: insufficient data"
@@ -248,7 +239,6 @@ def _cox_annotation(ax: plt.Axes, cox: dict, metric_label: str) -> None:
     ax.text(0.02, 0.03, text, transform=ax.transAxes,
             ha="left", va="bottom", fontsize=7, color="#444",
             bbox=dict(boxstyle="round,pad=0.3", fc="#FFFBE6", alpha=0.85, ec="none"))
-
 
 def build_field_plot(df: pd.DataFrame, field: str,
                      cox_high: dict, cox_low: dict,
@@ -282,7 +272,6 @@ def build_field_plot(df: pd.DataFrame, field: str,
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -397,7 +386,6 @@ def main() -> None:
 
     print(f"\nSummary CSV : {summary_path}")
     print(f"Plots in    : {OUTPUT_DIR}")
-
 
 if __name__ == "__main__":
     main()

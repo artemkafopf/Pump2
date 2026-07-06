@@ -1,4 +1,4 @@
-"""Build mart__vt_freq55: one row per run, replacing load_run_stats() in vt_freq55_app.py.
+"""Build mart__vt_freq55: one row per run, replacing load_run_stats() in freq_exposure_app.py.
 
 Joins:
   raw__v03_runs               — identifiers, dates, equipment specs
@@ -84,7 +84,8 @@ def run(conn=None) -> None:
                 ppt = pd.read_sql(
                     """
                     SELECT p.well_key, r.row_id,
-                           p.cum_salt_load_kg, p.cum_gypsum_scale_proxy
+                           p.cum_salt_load_kg, p.cum_gypsum_scale_proxy,
+                           p.cum_calcium_load_kg, p.cum_chloride_load_kg, p.cum_sulfate_load_kg
                     FROM proc__daily_precipitate p
                     JOIN raw__v03_runs r ON r.well_key = p.well_key
                     WHERE p.dt = (
@@ -96,7 +97,10 @@ def run(conn=None) -> None:
                     conn,
                 )
                 if not ppt.empty:
-                    base = base.merge(ppt[["row_id", "cum_salt_load_kg", "cum_gypsum_scale_proxy"]], on="row_id", how="left")
+                    ppt_cols = [c for c in ["row_id", "cum_salt_load_kg", "cum_gypsum_scale_proxy",
+                                            "cum_calcium_load_kg", "cum_chloride_load_kg", "cum_sulfate_load_kg"]
+                                if c in ppt.columns]
+                    base = base.merge(ppt[ppt_cols], on="row_id", how="left")
             except Exception:
                 pass  # proc__daily_precipitate may not exist yet
 

@@ -25,6 +25,29 @@ To run the CatBoost app locally:
 streamlit run streamlit_apps/catboost_app.py
 ```
 
+To run the latent Weibull and competing-risks playground:
+
+```bash
+streamlit run streamlit_apps/latent_weibull_competing_risks.py
+```
+
+To run the Bayesian latent Weibull fitter:
+
+```bash
+streamlit run streamlit_apps/bayesian_latent_weibull.py
+```
+
+To run the Vt short-mode interaction surface explorer:
+
+```bash
+streamlit run streamlit_apps/vt_mode_interaction_surface.py
+```
+
+The Bayesian app supports both:
+
+- fixed `K` fitting;
+- unknown `K` inference with birth/death MCMC and a truncated Poisson prior.
+
 ## Recommended local setup
 
 From the repository root:
@@ -46,6 +69,27 @@ For the CatBoost app:
 ```bash
 .\scripts\setup_streamlit.ps1
 .\scripts\run_catboost_streamlit.ps1
+```
+
+For the latent Weibull and competing-risks playground:
+
+```bash
+.\scripts\setup_streamlit.ps1
+.\scripts\run_latent_weibull_streamlit.ps1
+```
+
+For the Bayesian latent Weibull fitter:
+
+```bash
+.\scripts\setup_streamlit.ps1
+.\scripts\run_bayesian_latent_weibull_streamlit.ps1
+```
+
+For the Vt short-mode interaction surface explorer:
+
+```bash
+.\scripts\setup_streamlit.ps1
+.\scripts\run_vt_mode_interaction_surface_streamlit.ps1
 ```
 
 If you prefer not to use the helper script:
@@ -70,4 +114,28 @@ Or:
 $env:PYTHONPATH = "backend"
 python -m pip install -r streamlit_apps/requirements.txt
 python -m streamlit run streamlit_apps/catboost_app.py
+```
+
+Or:
+
+```bash
+$env:PYTHONPATH = "backend"
+python -m pip install -r streamlit_apps/requirements.txt
+python -m streamlit run streamlit_apps/latent_weibull_competing_risks.py
+```
+
+Or:
+
+```bash
+$env:PYTHONPATH = "backend"
+python -m pip install -r streamlit_apps/requirements.txt
+python -m streamlit run streamlit_apps/bayesian_latent_weibull.py
+```
+
+Or:
+
+```bash
+$env:PYTHONPATH = "backend"
+python -m pip install -r streamlit_apps/requirements.txt
+python -m streamlit run streamlit_apps/vt_mode_interaction_surface.py
 ```

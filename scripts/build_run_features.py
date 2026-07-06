@@ -18,6 +18,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from analysis.input_paths import resolve_v03_all_path
 from analysis.modeling_config import (
+from analysis.paths import results_dir
     DEFAULT_GLF_THRESHOLD,
     DEFAULT_INFANT_MORTALITY_DAYS,
     DEFAULT_MATURE_WINDOW_DAYS,
@@ -28,7 +29,7 @@ from scripts.analyze_failure_horizon import ALL_PATH, load_runs
 from scripts.data_utils import _numeric, add_dynamic_salt_proxies, load_daily_merged, source_coverage_report
 
 
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "run_features_phase1"
+_SLUG = "run_features"
 
 
 def _normalize_pump_text(value: object) -> str:
@@ -343,7 +344,7 @@ def build_run_features(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build Phase 1 mature-life run features.")
     parser.add_argument("--input", default=str(resolve_v03_all_path()), help="Path to the run-level workbook.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for CSV/JSON outputs.")
+    parser.add_argument("--output-dir", default=None, help="Directory for CSV/JSON outputs.")
     parser.add_argument("--predictive", action="store_true", help="Build predictive-safe feature table (reject _w_ features).")
     parser.add_argument("--no-whole-life", action="store_true", help="Do not include explanatory whole-life features.")
     return parser.parse_args()
@@ -351,7 +352,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else results_dir(_SLUG)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     runs = load_runs(Path(args.input))

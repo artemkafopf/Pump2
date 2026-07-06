@@ -10,8 +10,11 @@ For each run in raw__v03_runs, compute over the run's daily interval:
   - n_freq_below_45hz      : count of days below 45 Hz
   - total_liquid_m3        : sum of qliq over the run (TLF)
   - total_freq_hz_days     : sum of freq over valid days (TRF)
-  - avg_glf               : whole-run mean of gas_factor (all days with valid data)
+  - avg_glf               : whole-run mean of gas_factor (valid days only)
   - avg_kpod              : whole-run mean of qliq / nominal_flow_m3d
+
+All per-property validity bounds below are confirmed against the actual data distribution in
+proc__daily_merged. Values outside these ranges are physically impossible for ESP operations.
 """
 from __future__ import annotations
 
@@ -34,6 +37,29 @@ from scripts.db import StepTimer, get_warehouse_conn, upsert_df
 FREQ_HIGH_HZ = 55.0
 FREQ_LOW_HZ = 45.0
 MIN_VALID_DAYS = 7
+
+# Hard physical validity bounds — values outside cannot be real ESP readings.
+# Data evidence: freq max=1700 (real VFD limit ~70 Hz, absolute HW limit ~100 Hz),
+# qliq max=40000 (p99.9%=1333; no ESP well produces 5000+ m³/day),
+# gas_factor max=4.9M (p99%=10K; GLF>5000 on oil well is sensor error).
+FREQ_VALID_MAX_HZ: float = 100.0    # absolute VFD hardware limit
+QLIQ_VALID_MAX_M3D: float = 5000.0  # generous upper bound for ESP liquid rate
+GLF_VALID_MAX: float = 5000.0       # GLF above this on an oil ESP is sensor error
+
+
+def _valid_freq(s: pd.Series) -> pd.Series:
+    """Return a boolean mask: freq values that are physically plausible."""
+    return s.notna() & (s > 0.0) & (s <= FREQ_VALID_MAX_HZ)
+
+
+def _valid_qliq(s: pd.Series) -> pd.Series:
+    """Return a boolean mask: qliq values that are physically plausible."""
+    return s.notna() & (s >= 0.0) & (s <= QLIQ_VALID_MAX_M3D)
+
+
+def _valid_glf(s: pd.Series) -> pd.Series:
+    """Return a boolean mask: gas_factor values that are physically plausible."""
+    return s.notna() & (s >= 0.0) & (s <= GLF_VALID_MAX)
 
 
 def run(conn=None) -> None:
@@ -64,6 +90,14 @@ def run(conn=None) -> None:
         daily["qliq"] = _numeric(daily["qliq"])
         daily["gas_factor"] = _numeric(daily["gas_factor"])
 
+        op_daily = pd.read_sql(
+            f"SELECT well_key, dt, in_operation FROM proc__daily_operating WHERE well_key IN ({placeholders})",
+            conn,
+            parse_dates=["dt"],
+        )
+        daily = daily.merge(op_daily[["well_key", "dt", "in_operation"]], on=["well_key", "dt"], how="left")
+        daily["in_operation"] = daily["in_operation"].fillna(0).astype(int)
+
         print(f"[build_freq_exposure] Computing freq exposure for {len(runs)} runs...")
         rows: list[dict] = []
         for run_row in runs.to_dict(orient="records"):
@@ -82,26 +116,37 @@ def run(conn=None) -> None:
             qliq = run_daily["qliq"]
             gas_factor = run_daily["gas_factor"]
 
-            valid_mask = freq.notna() & (freq > 0)
-            n_valid = int(valid_mask.sum())
-            valid_freq = freq.loc[valid_mask]
+            # Frequency validity: all physically plausible readings (0 < freq <= 100 Hz).
+            freq_ok = _valid_freq(freq)
+            n_valid = int(freq_ok.sum())
+            valid_freq = freq.loc[freq_ok]  # used for TRF (total_freq_hz_days) only
 
-            n_above = int((valid_freq > FREQ_HIGH_HZ).sum()) if n_valid > 0 else 0
-            n_below = int((valid_freq < FREQ_LOW_HZ).sum()) if n_valid > 0 else 0
-            frac_above = float(n_above / n_valid) if n_valid >= MIN_VALID_DAYS else np.nan
-            frac_below = float(n_below / n_valid) if n_valid >= MIN_VALID_DAYS else np.nan
-            signed_exposure = float(frac_above - frac_below) if n_valid >= MIN_VALID_DAYS else np.nan
-            total_liq = float(qliq.clip(lower=0).sum(min_count=1))
-            total_freq_val = float(valid_freq.sum()) if n_valid > 0 else np.nan
-            freq_w_mean = float(valid_freq.mean()) if n_valid > 0 else np.nan
+            # Operating-day filter: exclude standby days where VFD holds a setpoint (~33–35 Hz).
+            freq_ok_op = freq_ok & (run_daily["in_operation"] == 1)
+            n_valid_op = int(freq_ok_op.sum())
+            valid_freq_op = freq.loc[freq_ok_op]
 
-            # Whole-run avg_glf and avg_kpod — same definitions as original load_run_stats().
-            glf_valid = gas_factor.dropna()
-            avg_glf = float(glf_valid.mean()) if len(glf_valid) > 0 else np.nan
+            n_above = int((valid_freq_op > FREQ_HIGH_HZ).sum()) if n_valid_op > 0 else 0
+            n_below = int((valid_freq_op < FREQ_LOW_HZ).sum()) if n_valid_op > 0 else 0
+            frac_above = float(n_above / n_valid_op) if n_valid_op >= MIN_VALID_DAYS else np.nan
+            frac_below = float(n_below / n_valid_op) if n_valid_op >= MIN_VALID_DAYS else np.nan
+            signed_exposure = float(frac_above - frac_below) if n_valid_op >= MIN_VALID_DAYS else np.nan
+            freq_w_mean = float(valid_freq_op.mean()) if n_valid_op > 0 else np.nan
+            total_freq_val = float(valid_freq.sum()) if n_valid > 0 else np.nan  # TRF: all valid days
 
+            # Liquid: only non-negative values within plausible ESP rate range.
+            qliq_ok = _valid_qliq(qliq)
+            valid_qliq = qliq.loc[qliq_ok]
+            total_liq = float(valid_qliq.sum()) if len(valid_qliq) > 0 else 0.0
+
+            # Gas-liquid factor: non-negative and below sensor-error threshold.
+            glf_ok = _valid_glf(gas_factor)
+            valid_glf = gas_factor.loc[glf_ok]
+            avg_glf = float(valid_glf.mean()) if len(valid_glf) > 0 else np.nan
+
+            # KPod = qliq / nominal_flow, using the same valid qliq mask.
             if pd.notna(nom_flow) and nom_flow > 0:
-                qliq_valid = qliq.dropna()
-                avg_kpod = float((qliq_valid / nom_flow).mean()) if len(qliq_valid) > 0 else np.nan
+                avg_kpod = float((valid_qliq / nom_flow).mean()) if len(valid_qliq) > 0 else np.nan
             else:
                 avg_kpod = np.nan
 
@@ -111,7 +156,8 @@ def run(conn=None) -> None:
                 "freq_below_45hz_pct": frac_below,
                 "freq_signed_exposure": signed_exposure,
                 "freq_w_mean": freq_w_mean,
-                "n_freq_valid_days": n_valid,
+                "n_freq_valid_days": n_valid_op,
+                "n_freq_op_days": n_valid_op,
                 "n_freq_above_55hz": n_above,
                 "n_freq_below_45hz": n_below,
                 "total_liquid_m3": total_liq,

@@ -40,6 +40,7 @@ for path_text in (str(REPO_ROOT), str(BACKEND_DIR)):
         sys.path.insert(0, path_text)
 
 from analysis.input_paths import resolve_v03_all_path
+from analysis.paths import results_dir
 from scripts.analyze_failure_horizon import load_runs
 from scripts.data_utils import load_daily_merged
 
@@ -55,7 +56,8 @@ MIN_ROWS_PER_KM_BIN = 5
 BIN_LABELS = ["y = 0", "0 < y <= 0.2", "0.2 < y < 0.5", "y > 0.5"]
 BIN_COLORS = ["#4C72B0", "#55A868", "#C44E52", "#DD8452"]
 
-OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "vt_freq55_exposure"
+_SLUG = "vt_freq55_exposure"
+OUTPUT_DIR = results_dir(_SLUG)
 COMBO_DIR = OUTPUT_DIR / "combinations"
 PLOT_DIR = OUTPUT_DIR / "plots"
 for directory in (OUTPUT_DIR, COMBO_DIR, PLOT_DIR):

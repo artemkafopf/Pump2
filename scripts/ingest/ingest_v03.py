@@ -14,6 +14,7 @@ for _p in (str(REPO_ROOT), str(BACKEND_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from analysis.data.label_hygiene import FIELD_ALIAS_MAP, trim_failed_node
 from analysis.input_paths import resolve_v03_all_path, resolve_v03_failures_path
 from scripts.db import StepTimer, file_sha256, get_warehouse_conn, log_source_hash, upsert_df
 from scripts.data_utils import _numeric, normalize_well_key
@@ -83,6 +84,13 @@ def _build_warehouse_frame(df: pd.DataFrame) -> pd.DataFrame:
                 "stages", "submergence_depth_m", "pbubble_atm", "vg_m", "nominal_current_a", "h2s_mg_l"):
         if col in out.columns:
             out[col] = _numeric(out[col])
+
+    # Label hygiene (Phase A T5 wiring): trim failed_node so 'НКТ ' merges with 'НКТ',
+    # and collapse confirmed field aliases onto their codes. Unmapped field names are
+    # kept as-is (needs_review flow lives in scripts/run/phase_a_label_hygiene.py).
+    out["failed_node"] = out["failed_node"].map(trim_failed_node)
+    out["field"] = out["field"].astype("string").str.strip()
+    out["field"] = out["field"].map(lambda v: FIELD_ALIAS_MAP.get(v, v) if pd.notna(v) else v)
 
     return out
 

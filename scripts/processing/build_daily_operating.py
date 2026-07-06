@@ -1,11 +1,11 @@
 """Build proc__daily_operating: binary in-operation flag per well per day.
 
 Priority:
-  1. techregime status == "В работе"  → op_source = "techregime_status"
-  2. telemetry qliq > 0               → op_source = "telemetry_qliq"
+  1. telemetry qliq > 0               → op_source = "telemetry_qliq"
+  2. techregime status == "В работе"  → op_source = "techregime_status"
   3. no data                          → in_operation = 0, op_source = "missing"
 
-Input: proc__daily_merged (for telemetry qliq column) + raw techregime SQLite (for status).
+Input: telemetry_daily SQLite (direct, no fallback) + raw techregime SQLite (for status).
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ for _p in (str(REPO_ROOT), str(BACKEND_DIR)):
         sys.path.insert(0, _p)
 
 from scripts.analyze_true_ttf import load_techregime_status_daily
-from scripts.data_utils import _numeric, normalize_well_key
+from scripts.data_utils import _load_telemetry_daily, _numeric, normalize_well_key
 from scripts.db import StepTimer, get_warehouse_conn, upsert_df
 
 _CHUNK_SIZE = 200
@@ -52,13 +52,11 @@ def run(conn=None) -> None:
                 chunk_wkeys = [normalize_well_key(w) for w in chunk_wells if normalize_well_key(w)]
                 placeholders = ",".join([f"'{wk}'" for wk in chunk_wkeys])
 
-                # Load telemetry qliq from warehouse.
-                tel_df = pd.read_sql(
-                    f"SELECT well_key, dt, qliq FROM proc__daily_merged WHERE well_key IN ({placeholders})",
-                    conn,
-                    parse_dates=["dt"],
-                )
-                tel_df["tele_op"] = (_numeric(tel_df["qliq"]) > 0).fillna(False)
+                # Load telemetry qliq directly from source — avoids techregime fallback in merged table.
+                tel_raw = _load_telemetry_daily(chunk_wells)
+                tel_raw["well_key"] = tel_raw["well_id"].map(normalize_well_key)
+                tel_raw["tele_op"] = (_numeric(tel_raw["qliq"]) > 0).fillna(False)
+                tel_df = tel_raw[["well_key", "dt", "tele_op"]]
 
                 # Load techregime status from source SQLite.
                 treg_df = load_techregime_status_daily(chunk_wells)
@@ -73,16 +71,16 @@ def run(conn=None) -> None:
                 merged["tele_op"] = merged["tele_op"].fillna(False)
                 merged["treg_in_operation"] = merged["treg_in_operation"].fillna(False)
 
-                # Apply priority rule.
+                # Apply priority rule: telemetry first, techregime as fallback.
                 merged["in_operation"] = 0
                 merged["op_source"] = "missing"
 
-                treg_mask = merged["treg_in_operation"]
-                tele_mask = (~treg_mask) & merged["tele_op"]
-                merged.loc[treg_mask, "in_operation"] = 1
-                merged.loc[treg_mask, "op_source"] = "techregime_status"
+                tele_mask = merged["tele_op"]
+                treg_mask = (~tele_mask) & merged["treg_in_operation"]
                 merged.loc[tele_mask, "in_operation"] = 1
                 merged.loc[tele_mask, "op_source"] = "telemetry_qliq"
+                merged.loc[treg_mask, "in_operation"] = 1
+                merged.loc[treg_mask, "op_source"] = "techregime_status"
 
                 result = merged[["well_key", "dt", "in_operation", "op_source"]].copy()
                 result = result.loc[result["well_key"].notna() & result["dt"].notna()]

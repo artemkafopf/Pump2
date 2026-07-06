@@ -1,6 +1,12 @@
-"""Build proc__ttf_true: operational-day TTF per run with techregime-first, telemetry fallback.
+"""Build proc__ttf_true: TTF variants per run.
 
-Ports compare_ttf_sources() from scripts/analyze_true_ttf.py into the warehouse.
+TTF columns:
+  ttf_true_best_days  — productive operating days (qliq > 0), union of tele + treg sources
+  ttf_motor_days      — motor-running days (freq > STANDBY_FREQ_HZ OR treg "В работе"),
+                        includes standby; represents actual wear accumulation
+  ttf_tele_days       — productive days per telemetry qliq only (transparency)
+  ttf_treg_days       — productive days per techregime status only (transparency)
+  ttf_union_days      — alias for ttf_true_best_days (kept for downstream compatibility)
 """
 from __future__ import annotations
 
@@ -18,8 +24,11 @@ for _p in (str(REPO_ROOT), str(BACKEND_DIR)):
         sys.path.insert(0, _p)
 
 from scripts.analyze_true_ttf import load_techregime_status_daily
-from scripts.data_utils import _numeric, load_daily_merged
+from scripts.data_utils import _load_telemetry_daily, _numeric
 from scripts.db import StepTimer, get_warehouse_conn, upsert_df
+
+# Frequency above this threshold means motor is running (excludes standby ~33-35 Hz).
+STANDBY_FREQ_HZ: float = 40.0
 
 
 def build_ttf_true(runs: pd.DataFrame) -> pd.DataFrame:
@@ -29,8 +38,9 @@ def build_ttf_true(runs: pd.DataFrame) -> pd.DataFrame:
     minimal columns needed by the warehouse table.
     """
     wells = sorted(runs["well"].dropna().astype(str).str.strip().unique().tolist())
-    daily = load_daily_merged(wells)
-    daily["tele_in_operation"] = (_numeric(daily.get("qliq", pd.Series(index=daily.index, dtype=float))) > 0).fillna(False)
+    tel_daily = _load_telemetry_daily(wells)
+    tel_daily["tele_in_operation"] = (_numeric(tel_daily.get("qliq", pd.Series(index=tel_daily.index, dtype=float))) > 0).fillna(False)
+    tel_daily["motor_on"] = (_numeric(tel_daily.get("freq", pd.Series(index=tel_daily.index, dtype=float))) > STANDBY_FREQ_HZ).fillna(False)
 
     treg = load_techregime_status_daily(wells)
 
@@ -40,15 +50,14 @@ def build_ttf_true(runs: pd.DataFrame) -> pd.DataFrame:
         install = pd.Timestamp(run["install_date"])
         stop = pd.Timestamp(run["stop_date"])
 
-        run_daily = daily.loc[
-            (daily["well_id"].astype("string") == well_id)
-            & (daily["dt"] >= install)
-            & (daily["dt"] <= stop)
+        tel_run = tel_daily.loc[
+            (tel_daily["well_id"].astype("string") == well_id)
+            & (tel_daily["dt"] >= install)
+            & (tel_daily["dt"] <= stop)
         ].copy()
-        tele_days = int(run_daily["dt"].nunique())
-        tele_operating_days = int(run_daily.loc[run_daily["tele_in_operation"], "dt"].nunique())
+        tele_days = int(tel_run["dt"].nunique())
 
-        treg_operating_days = 0
+        treg_run = pd.DataFrame()
         treg_days = 0
         if not treg.empty:
             treg_run = treg.loc[
@@ -57,17 +66,23 @@ def build_ttf_true(runs: pd.DataFrame) -> pd.DataFrame:
                 & (treg["dt"] <= stop)
             ].copy()
             treg_days = int(treg_run["dt"].nunique())
-            treg_operating_days = int(treg_run.loc[treg_run["treg_in_operation"], "dt"].nunique())
 
-        if treg_operating_days > 0:
-            ttf_true_best = float(treg_operating_days)
-            ttf_true_source = "techregime_status"
-        elif tele_operating_days > 0:
-            ttf_true_best = float(tele_operating_days)
-            ttf_true_source = "telemetry_qliq_gt_0"
-        else:
-            ttf_true_best = np.nan
-            ttf_true_source = "missing"
+        treg_op_dates = set(treg_run.loc[treg_run["treg_in_operation"], "dt"].dt.normalize()) if not treg_run.empty else set()
+        tele_op_dates = set(tel_run.loc[tel_run["tele_in_operation"], "dt"].dt.normalize())
+        motor_on_dates = set(tel_run.loc[tel_run["motor_on"], "dt"].dt.normalize())
+
+        treg_operating_days = len(treg_op_dates)
+        tele_operating_days = len(tele_op_dates)
+        union_op_days = len(treg_op_dates | tele_op_dates)
+        motor_days = len(motor_on_dates | treg_op_dates)  # freq>40Hz OR techregime "В работе"
+
+        ttf_true_best = float(union_op_days) if union_op_days > 0 else np.nan
+        ttf_true_source = (
+            "union" if treg_op_dates and tele_op_dates
+            else "techregime" if treg_op_dates
+            else "telemetry" if tele_op_dates
+            else "missing"
+        )
 
         rows.append({
             "row_id": int(run["row_id"]),
@@ -75,6 +90,8 @@ def build_ttf_true(runs: pd.DataFrame) -> pd.DataFrame:
             "ttf_true_source": ttf_true_source,
             "ttf_tele_days": float(tele_operating_days) if tele_days > 0 else np.nan,
             "ttf_treg_days": float(treg_operating_days) if treg_days > 0 else np.nan,
+            "ttf_union_days": float(union_op_days) if union_op_days > 0 else np.nan,
+            "ttf_motor_days": float(motor_days) if motor_days > 0 else np.nan,
         })
 
     return pd.DataFrame(rows)

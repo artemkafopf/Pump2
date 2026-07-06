@@ -8,11 +8,22 @@ frontend/node_modules/
 frontend/dist/
 
 # Local/source data: never commit project inputs or mirrored databases.
-data/
+# Anchored to the repo root so it does NOT catch source packages like
+# backend/analysis/data/ (see CLAUDE.md — reusable logic lives there).
+/data/
 
 # Generated analysis artifacts can still contain sensitive source-derived data.
 analysis_outputs/
 
+# New results layer (replaces analysis_outputs/ for new work).
+# Directory is created at runtime by analysis.paths.results_dir().
+results/
+
 # Temporary extraction / scratch work.
 .tmp/
+temp/
+catboost_info/
+
+# Archive of legacy artifacts and unrelated sub-projects.
+archive/
 

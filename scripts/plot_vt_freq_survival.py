@@ -19,9 +19,29 @@ import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-INPUT_CSV = REPO_ROOT / "analysis_outputs" / "vt_ttf_freq55" / "vt_ttf_freq55_data.csv"
-OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "vt_ttf_freq55"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+for _p in (str(REPO_ROOT), str(REPO_ROOT / "backend")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+from analysis.paths import results_dir, RESULTS_ROOT
+
+_SLUG = "vt_freq_survival"
+OUTPUT_DIR = results_dir(_SLUG)
+
+_LEGACY_INPUT = REPO_ROOT / "analysis_outputs" / "vt_ttf_freq55" / "vt_ttf_freq55_data.csv"
+
+
+def _resolve_input_csv(explicit: str | None = None) -> Path:
+    if explicit:
+        return Path(explicit)
+    matches = sorted(RESULTS_ROOT.glob("vt_ttf_vs_freq55/*/vt_ttf_freq55_data.csv"), key=lambda p: p.stat().st_mtime)
+    if matches:
+        return matches[-1]
+    if _LEGACY_INPUT.exists():
+        return _LEGACY_INPUT
+    raise FileNotFoundError("vt_ttf_freq55_data.csv not found; run plot_vt_ttf_vs_freq55.py first")
+
+
+INPUT_CSV = _resolve_input_csv()
 
 MOUNT_YEARS = {2023, 2024, 2025, 2026}
 INFANT_MORTALITY_DAYS = 30

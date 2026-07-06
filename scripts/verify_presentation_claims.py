@@ -41,6 +41,7 @@ from analysis.derived_features import apply_derived_columns
 from analysis.input_paths import resolve_presentation_path, resolve_v03_all_path
 from analysis.sqlite_paths import resolve_telemetry_db_path
 from analysis.weibull_model import fit_weibull_stress_model
+from analysis.paths import results_dir
 from scripts.analyze_failure_horizon import load_techregime_daily
 from scripts.analyze_v03_stress import _numeric
 
@@ -48,7 +49,8 @@ from scripts.analyze_v03_stress import _numeric
 PRESENTATION_PATH = resolve_presentation_path()
 TARGET_PATH = resolve_v03_all_path()
 TELEMETRY_DB_PATH = resolve_telemetry_db_path()
-OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "presentation_verification_2026_06_18"
+_SLUG = "presentation_verification"
+OUTPUT_DIR = results_dir(_SLUG)
 FIGURES_DIR = OUTPUT_DIR / "figures"
 TABLES_DIR = OUTPUT_DIR / "tables"
 

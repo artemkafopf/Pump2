@@ -26,12 +26,13 @@ except ModuleNotFoundError:  # pragma: no cover
 from analysis.modeling_config import assert_no_explanatory_features
 from analysis.transform_selection import rank_transform_candidates
 from analysis.weibull_model import fit_weibull_stress_model
+from analysis.paths import results_dir
 from scripts.analyze_failure_horizon import ALL_PATH, prepare_feature_matrix
 from scripts.build_run_features import build_run_features, load_runs
 from scripts.data_utils import _numeric, split_by_run_id
 
 
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "mature_ttf_phase1"
+_SLUG = "mature_ttf"
 
 WEIBULL_STRESS_PRIORITY = [
     ("kpod_freq_w_mean", 0.10),
@@ -304,13 +305,13 @@ def fit_weibull_explanatory(df: pd.DataFrame, stress_terms: list[dict[str, objec
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run mature-life TTF workflow on the Phase 1 run feature table.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for output files.")
+    parser.add_argument("--output-dir", default=None, help="Directory for output files.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else results_dir(_SLUG)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     runs = load_runs(ALL_PATH)

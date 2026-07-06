@@ -6,6 +6,8 @@ It now also includes an interpretable Weibull stress-reliability workflow:
 
 - reusable fitting code in `backend/analysis`
 - a standalone Streamlit UI in `streamlit_apps/` as an alternative to the Vue frontend
+- a parameter-driven latent Weibull plus competing-risks playground in `streamlit_apps/latent_weibull_competing_risks.py`
+- a Bayesian latent Weibull fitter for right-censored data in `streamlit_apps/bayesian_latent_weibull.py`, including fixed-K and unknown-K birth/death MCMC
 
 ## Stack
 
@@ -38,6 +40,20 @@ Run the alternative Streamlit app locally:
 ```bash
 .\scripts\setup_streamlit.ps1
 .\scripts\run_streamlit.ps1
+```
+
+Run the latent Weibull and competing-risks playground:
+
+```bash
+.\scripts\setup_streamlit.ps1
+.\scripts\run_latent_weibull_streamlit.ps1
+```
+
+Run the Bayesian latent Weibull fitter:
+
+```bash
+.\scripts\setup_streamlit.ps1
+.\scripts\run_bayesian_latent_weibull_streamlit.ps1
 ```
 
 Core Weibull modules live in `backend/analysis`:

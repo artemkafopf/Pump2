@@ -19,11 +19,12 @@ if str(BACKEND_DIR) not in sys.path:
 
 from analysis.input_paths import resolve_v03_all_path
 from analysis.sqlite_paths import resolve_techregime_db_path
+from analysis.paths import results_dir
 from scripts.analyze_failure_horizon import load_runs
 from scripts.data_utils import _numeric, load_daily_merged
 
 
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "analysis_outputs" / "ttf_true_analysis"
+_SLUG = "true_ttf"
 TR_DB_PATH = resolve_techregime_db_path()
 
 TELEMETRY_IN_OPERATION_RULE = "qliq > 0"
@@ -32,7 +33,7 @@ TELEMETRY_IN_OPERATION_RULE = "qliq > 0"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare calendar/runtime TTF against operational-day TTF from telemetry and techregime.")
     parser.add_argument("--input", default=str(resolve_v03_all_path()), help="Path to V03_all workbook.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory.")
+    parser.add_argument("--output-dir", default=None, help="Output directory.")
     return parser.parse_args()
 
 
@@ -229,7 +230,7 @@ def build_summary(run_cmp: pd.DataFrame, candidates: pd.DataFrame) -> dict[str, 
 
 def main() -> None:
     args = parse_args()
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else results_dir(_SLUG)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     runs = load_runs_with_pdk(Path(args.input))
