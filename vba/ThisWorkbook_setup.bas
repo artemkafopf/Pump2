@@ -7,7 +7,9 @@ Option Explicit
 ' ============================================================
 
 Private Sub Workbook_Open()
-    ' Load model registry automatically when the workbook opens.
+    ' Load both registries automatically when the workbook opens.
     ' This avoids the first-call delay on large batches.
     Call LoadModelRegistry
+    Call LoadModeMix        ' Phase B mode-mix planning layer (ESP_ModeMix)
+    Call LoadHazardLayer    ' operational + completion overlay (ESP_CoxCoeffs/ESP_RunCov)
 End Sub

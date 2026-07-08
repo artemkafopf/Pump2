@@ -4,16 +4,27 @@ Option Explicit
 ' ============================================================
 ' mdlPublicFunctions -- Worksheet-callable UDFs.
 '
+' CLOCK NOTE (agents/analyses/vba_model_v2.md §0.1 = document-only):
+'   The baselines are fitted on the OPERATING-time clock (ttf_mix).  Every time
+'   argument (age t / t0) and every time output (RUL, B20/B50/B80, TTF) is in
+'   OPERATING days, not calendar days.  No conversion is applied here -- feeding
+'   calendar age overstates a pump's age.  ESP_Uptime returns the per-stratum
+'   uptime factor u_s = mean(ttf_mix/run_days) so the user can convert manually
+'   (age_op ~= age_cal * u_s ; RUL_cal ~= RUL_op / u_s).
+'
 ' All functions accept raw strings directly from the spreadsheet:
 '   field      -> column A  (Field name, e.g. "Az", "Ya", "Vt")
 '   h2s        -> column BW (raw Russian cell value, mapped to sour/nonsour)
 '   contractor -> column D  (raw Russian cell value, mapped to brt/slb/oth)
 '
 ' Usage examples (row 2):
-'   =ESP_RUL(I2, A2, BW2, D2)
-'   =ESP_B50(A2, BW2, D2)
+'   =ESP_RUL(I2, A2, BW2, D2)        <- RUL in OPERATING days
+'   =ESP_B50(A2, BW2, D2)            <- median TTF in OPERATING days
+'   =ESP_ModelKind(A2, BW2, D2)      <- "k2" / "k1_aic" / "k1_degenerate"
+'   =ESP_Uptime(A2, BW2, D2)         <- per-stratum uptime factor (audit)
+'   =ESP_RunSeq(<well cell>)         <- run sequence number on that well
 '   =ESP_Predict(I2, BX2, A2, BW2, D2)
-'   =ESP_Debug(A2, BW2, D2)   <- diagnostic: returns stratum or error text
+'   =ESP_Debug(A2, BW2, D2)          <- diagnostic: returns stratum or error text
 ' ============================================================
 
 ' ------------------------------------------------------------------
@@ -138,10 +149,10 @@ ErrHandler:
 End Function
 
 ' ------------------------------------------------------------------
-' ESP_B10 -- 10th percentile TTF.
-' =ESP_B10(A2, BW2, D2)
+' ESP_B20 -- 20th percentile TTF (early-risk bound; replaces B10).
+' =ESP_B20(A2, BW2, D2)
 ' ------------------------------------------------------------------
-Public Function ESP_B10(ByVal field As String, _
+Public Function ESP_B20(ByVal field As String, _
                          ByVal h2s As String, _
                          ByVal contractor As String) As Variant
     On Error GoTo ErrHandler
@@ -149,19 +160,19 @@ Public Function ESP_B10(ByVal field As String, _
     Dim stratumKey As String, isDegen As Boolean
 
     If Not GetParams(field, h2s, contractor, w1, b1, e1, b2, e2, stratumKey, isDegen) Then
-        ESP_B10 = CVErr(xlErrNA) : Exit Function
+        ESP_B20 = CVErr(xlErrNA) : Exit Function
     End If
-    ESP_B10 = LatentQuantile(0.1, w1, b1, e1, b2, e2)
+    ESP_B20 = LatentQuantile(0.2, w1, b1, e1, b2, e2)
     Exit Function
 ErrHandler:
-    ESP_B10 = CVErr(xlErrValue)
+    ESP_B20 = CVErr(xlErrValue)
 End Function
 
 ' ------------------------------------------------------------------
-' ESP_B90 -- 90th percentile TTF.
-' =ESP_B90(A2, BW2, D2)
+' ESP_B80 -- 80th percentile TTF (maintenance horizon; replaces B90).
+' =ESP_B80(A2, BW2, D2)
 ' ------------------------------------------------------------------
-Public Function ESP_B90(ByVal field As String, _
+Public Function ESP_B80(ByVal field As String, _
                          ByVal h2s As String, _
                          ByVal contractor As String) As Variant
     On Error GoTo ErrHandler
@@ -169,12 +180,12 @@ Public Function ESP_B90(ByVal field As String, _
     Dim stratumKey As String, isDegen As Boolean
 
     If Not GetParams(field, h2s, contractor, w1, b1, e1, b2, e2, stratumKey, isDegen) Then
-        ESP_B90 = CVErr(xlErrNA) : Exit Function
+        ESP_B80 = CVErr(xlErrNA) : Exit Function
     End If
-    ESP_B90 = LatentQuantile(0.9, w1, b1, e1, b2, e2)
+    ESP_B80 = LatentQuantile(0.8, w1, b1, e1, b2, e2)
     Exit Function
 ErrHandler:
-    ESP_B90 = CVErr(xlErrValue)
+    ESP_B80 = CVErr(xlErrValue)
 End Function
 
 ' ------------------------------------------------------------------
@@ -286,6 +297,83 @@ Public Function ESP_IsDegenerate(ByVal field As String, _
     Exit Function
 ErrHandler:
     ESP_IsDegenerate = CVErr(xlErrValue)
+End Function
+
+' ------------------------------------------------------------------
+' ESP_ModelKind -- registry model kind, reported distinctly (T5):
+'   "k2"            K=2 mixture (AIC-preferred, non-degenerate)
+'   "k1_aic"        single Weibull preferred by AIC (a valid fit, NOT degenerate)
+'   "k1_degenerate" K=2 degenerated (w1>0.75) -> collapsed to single Weibull
+' =ESP_ModelKind(A2, BW2, D2)
+' ------------------------------------------------------------------
+Public Function ESP_ModelKind(ByVal field As String, _
+                              ByVal h2s As String, _
+                              ByVal contractor As String) As Variant
+    On Error GoTo ErrHandler
+    Dim h2sCls As String, ctrGrp As String
+    h2sCls = H2SClass(h2s)
+    ctrGrp = ContractorGroup(contractor)
+    If ctrGrp = "unk" Then ctrGrp = "Pooled"
+    Dim k As String
+    k = ResolveModelKind(field, h2sCls, ctrGrp)
+    ESP_ModelKind = IIf(k = "", CVErr(xlErrNA), k)
+    Exit Function
+ErrHandler:
+    ESP_ModelKind = CVErr(xlErrValue)
+End Function
+
+' ------------------------------------------------------------------
+' ESP_Uptime -- per-stratum uptime factor u_s = mean(ttf_mix / run_days).
+' Audit / manual clock conversion (§0.1 document-only): age_op ~= age_cal * u_s.
+' =ESP_Uptime(A2, BW2, D2)
+' ------------------------------------------------------------------
+Public Function ESP_Uptime(ByVal field As String, _
+                           ByVal h2s As String, _
+                           ByVal contractor As String) As Variant
+    On Error GoTo ErrHandler
+    Dim h2sCls As String, ctrGrp As String
+    h2sCls = H2SClass(h2s)
+    ctrGrp = ContractorGroup(contractor)
+    If ctrGrp = "unk" Then ctrGrp = "Pooled"
+    Dim u As Double
+    u = UptimeFactor(field, h2sCls, ctrGrp)
+    ESP_Uptime = IIf(u > 0, u, CVErr(xlErrNA))
+    Exit Function
+ErrHandler:
+    ESP_Uptime = CVErr(xlErrValue)
+End Function
+
+' ------------------------------------------------------------------
+' ESP_RunSeq -- run sequence number of the passed well cell within its column
+' (1 = first run on that well; counts this row and every earlier row with the
+' same well). Well name normalised trim + lower-case, matching the Python
+' normalize_well_key. DISPLAY-ONLY risk flag: log_run_seq was the largest theta
+' coefficient, but theta failed the OOS gate -- so it ships as a flag, never a
+' multiplier. Pass the well cell, e.g. =ESP_RunSeq(C2).
+' ------------------------------------------------------------------
+Public Function ESP_RunSeq(ByVal wellCell As Range) As Variant
+    On Error GoTo ErrHandler
+    Dim target As String
+    target = LCase(Trim(CStr(wellCell.Cells(1, 1).Value)))
+    If target = "" Then ESP_RunSeq = "" : Exit Function
+
+    Dim ws As Worksheet, col As Long, thisRow As Long
+    Set ws = wellCell.Worksheet
+    col = wellCell.Column
+    thisRow = wellCell.Row
+    If thisRow <= 2 Then ESP_RunSeq = 1 : Exit Function
+
+    Dim arr As Variant
+    arr = ws.Range(ws.Cells(2, col), ws.Cells(thisRow, col)).Value  ' >=2 rows -> 2D
+    Dim i As Long, cnt As Long
+    cnt = 0
+    For i = 1 To UBound(arr, 1)
+        If LCase(Trim(CStr(arr(i, 1)))) = target Then cnt = cnt + 1
+    Next i
+    ESP_RunSeq = cnt
+    Exit Function
+ErrHandler:
+    ESP_RunSeq = CVErr(xlErrValue)
 End Function
 
 ' ------------------------------------------------------------------

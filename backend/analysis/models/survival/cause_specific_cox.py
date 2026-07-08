@@ -67,6 +67,19 @@ def fit_cause_specific_cox(
     ev_by_stratum = work.groupby(strata, observed=True)[event_col].transform("sum")
     work = work[ev_by_stratum > 0]
 
+    # Drop zero-variance covariates on this complete-case sample (a constant
+    # column, e.g. has_telemetry in the telemetry-covered subset, NaNs the delta).
+    # NB lifelines uses *every* non-special column of ``work`` as a covariate (no
+    # formula here), so the dropped column must leave the frame, not just the list.
+    covariates = [c for c in covariates if work[c].nunique(dropna=True) >= 2]
+    if not covariates:
+        return CauseCoxResult(
+            summary=pd.DataFrame(), n=int(len(work)),
+            n_events=int(work[event_col].sum()), n_strata=0,
+            success=False, message="no non-constant covariates after complete-case",
+        )
+    work = work[list(dict.fromkeys(covariates + [event_col, duration_col, *strata, cluster_col]))]
+
     n_events = int(work[event_col].sum())
     if n_events < min_events:
         return CauseCoxResult(
@@ -76,20 +89,31 @@ def fit_cause_specific_cox(
             message=f"only {n_events} events (< min_events={min_events})",
         )
 
-    cph = CoxPHFitter(penalizer=penalizer)
-    try:
+    def _try_fit(pen: float):
+        cph = CoxPHFitter(penalizer=pen)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             cph.fit(
                 work, duration_col=duration_col, event_col=event_col,
                 strata=strata, cluster_col=cluster_col, robust=True,
             )
-    except Exception as exc:  # singular matrix, non-convergence, etc.
-        return CauseCoxResult(
-            summary=pd.DataFrame(),
-            n=int(len(work)), n_events=n_events, n_strata=0,
-            success=False, message=f"fit failed: {exc}",
-        )
+        return cph
+
+    used_penalizer = penalizer
+    try:
+        cph = _try_fit(penalizer)
+    except Exception:
+        # Near-singular / non-convergence (e.g. imputed near-duplicate rows in the
+        # telemetry subset) — fall back to a small ridge so the sweep does not abort.
+        used_penalizer = max(penalizer, 0.1)
+        try:
+            cph = _try_fit(used_penalizer)
+        except Exception as exc:
+            return CauseCoxResult(
+                summary=pd.DataFrame(),
+                n=int(len(work)), n_events=n_events, n_strata=0,
+                success=False, message=f"fit failed (even with ridge): {exc}",
+            )
 
     s = cph.summary
     out = pd.DataFrame({
@@ -108,7 +132,7 @@ def fit_cause_specific_cox(
         n_events=n_events,
         n_strata=int(work.groupby(strata, observed=True).ngroups),
         success=True,
-        message="ok",
+        message="ok" if used_penalizer == penalizer else f"ridge penalizer={used_penalizer}",
     )
 
 

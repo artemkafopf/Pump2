@@ -2,49 +2,38 @@ Attribute VB_Name = "mdlCoxHR"
 Option Explicit
 
 ' ============================================================
-' mdlCoxHR -- Cox proportional hazards covariate adjustment.
+' mdlCoxHR -- Cox proportional hazards covariate adjustment  [SHELVED / DEPRECATE-KEEP].
 '
-' Adds three covariates on top of the K=2 latent Weibull baseline:
+' STATUS (agents/analyses/vba_model_v2.md T3, §0.2 = deprecate-keep):
+'   The covariate theta layer is DECOMMISSIONED for forecasting.  The merged
+'   18-term theta failed the out-of-sample gate (temporal holdout C-index ~= chance
+'   at both cutoffs), as did Phase D's dynamic layer.  Program verdict: NO covariate
+'   theta ships -- strata + K=2 baselines are the forecasting engine.
+'   See results/model_report/2026-07-07/README.md §3.8 for the full reasoning.
 '
-'   delta_bep      = Q_actual / Q_nominal - 1
-'                    (negative = under-loaded, positive = over-loaded)
-'   p_bot          = bottomhole pressure, atm
-'   n_stages_ratio = n_stages / q_nominal  (stages per m3/day nominal)
+'   These UDFs remain CALLABLE for backward compatibility, but return theta == 1
+'   (i.e. exactly the baseline result) UNLESS an ESP_CoxCoeffs sheet exists AND
+'   carries an explicit cell labelled "enabled" set to TRUE.  The stale phase5e
+'   coefficient sheet has been removed; RunPredictions no longer writes Cox columns.
 '
-' Fitted by stratified Cox (cluster-robust SE on well_key),
-' 9 strata = Field x H2S class.  Source: phase5e, 2026-07-02.
+'   RE-ENABLE PATH (Phase E, only if a future theta passes the OOS gate): populate
+'   ESP_CoxCoeffs from theta_final_coeffs.csv (the 18-term fit,
+'   results/phase_c_joint_theta/.../theta_final_coeffs.csv) with enabled=TRUE, and
+'   wire CoxTheta to read the sheet.  The eta-rescaling math below (ApplyCoxEta) is
+'   the exact, unchanged, tested mechanism it would use -- kept alive for that day.
 '
-' Reference profile (theta = 1, i.e. population-mean pump):
-'   delta_bep_ref      = -0.342
-'   p_bot_ref          = 110.3 atm
-'   n_stages_ratio_ref =   2.249
-'
-' theta(x) = exp( b_bep * (delta_bep - ref_bep)
-'               + b_p   * (p_bot     - ref_p)
-'               + b_n   * (n_stages  - ref_n) )
+' Legacy 3-covariate reference (pre-Phase-C, superseded -- kept only so a re-enable
+' has a worked example): delta_bep, p_bot, n_stages_ratio; refs -0.342 / 110.3 / 2.249.
 '
 ' Cox -> Weibull eta rescaling (exact for Weibull baseline):
 '   eta_eff = eta / theta ^ (1 / beta)
+'   theta > 1 -> shorter life ; theta < 1 -> longer life ; theta = 1 -> baseline.
 '
-' theta > 1  higher risk than average pump  -> eta_eff < eta (shorter life)
-' theta < 1  lower  risk than average pump  -> eta_eff > eta (longer life)
-' theta = 1  average covariate profile      -> baseline unchanged
-'
-' Public UDFs added:
-'   ESP_Theta(delta_bep, p_bot, n_stages_ratio)
-'   ESP_SF_Cox(t, field, h2s, ctr, delta_bep, p_bot, n_stages_ratio)
-'   ESP_B50_Cox(field, h2s, ctr, delta_bep, p_bot, n_stages_ratio)
-'   ESP_B10_Cox(field, h2s, ctr, delta_bep, p_bot, n_stages_ratio)
-'   ESP_B90_Cox(field, h2s, ctr, delta_bep, p_bot, n_stages_ratio)
-'   ESP_RUL_Cox(t0, field, h2s, ctr, delta_bep, p_bot, n_stages_ratio)
-'
-' VBA lessons applied:
-'   - No MsgBox inside UDFs
-'   - ChrW() for any Unicode output
-'   - No cross-module Private references (EnsureRegistryLoaded via mdlModelRegistry)
+' VBA lessons applied: no MsgBox inside UDFs; ChrW() for Unicode; no cross-module
+' Private references (accessors via mdlModelRegistry).
 ' ============================================================
 
-' ── Fitted beta coefficients ─────────────────────────────────
+' ── Legacy fitted beta coefficients (pre-Phase-C; only used if re-enabled) ──
 Private Const BETA_BEP      As Double = 0.360455
 Private Const BETA_PBOT     As Double = 0.000466
 Private Const BETA_NSTAGES  As Double = -0.052032
@@ -59,22 +48,52 @@ Private Const THETA_MIN     As Double = 0.05
 Private Const THETA_MAX     As Double = 20#
 
 ' ------------------------------------------------------------------
-' CoxTheta -- core computation: theta = exp(beta . (x - x_ref))
-' Exported as ESP_Theta UDF.
+' CoxEnabled -- the deprecate-keep switch.  TRUE only if an ESP_CoxCoeffs sheet
+' exists AND a cell labelled "enabled" (col A) holds TRUE (col B).  Never MsgBox.
+' ------------------------------------------------------------------
+Public Function CoxEnabled() As Boolean
+    On Error GoTo NotEnabled
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Worksheets("ESP_CoxCoeffs")
+    ' v2 schema: an "enabled" HEADER column (row 1), one value per covariate row.
+    Dim lastCol As Long, c As Long, enCol As Long
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    enCol = 0
+    For c = 1 To lastCol
+        If LCase(Trim(CStr(ws.Cells(1, c).Value))) = "enabled" Then enCol = c : Exit For
+    Next c
+    If enCol > 0 Then
+        Dim v As String
+        v = UCase(Trim(CStr(ws.Cells(2, enCol).Value)))
+        CoxEnabled = (v = "TRUE" Or v = "1" Or v = "-1" Or v = "YES")
+        Exit Function
+    End If
+    ' Legacy fallback: a cell labelled "enabled" in column A.
+    Dim lastRow As Long, i As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    For i = 1 To lastRow
+        If LCase(Trim(CStr(ws.Cells(i, 1).Value))) = "enabled" Then
+            CoxEnabled = (UCase(Trim(CStr(ws.Cells(i, 2).Value))) = "TRUE")
+            Exit Function
+        End If
+    Next i
+NotEnabled:
+    CoxEnabled = False
+End Function
+
+' ------------------------------------------------------------------
+' CoxTheta -- hazard multiplier.  DEPRECATE-KEEP: returns 1 (baseline) unless the
+' Cox layer is explicitly re-enabled via ESP_CoxCoeffs!enabled=TRUE.
 ' ------------------------------------------------------------------
 Public Function CoxTheta(ByVal deltaBEP As Double, _
                           ByVal pBot As Double, _
                           ByVal nStagesRatio As Double) As Double
-    Dim lp As Double
-    lp = BETA_BEP    * (deltaBEP     - REF_BEP)    _
-       + BETA_PBOT   * (pBot         - REF_PBOT)   _
-       + BETA_NSTAGES * (nStagesRatio - REF_NSTAGES)
-
-    Dim th As Double
-    th = Exp(lp)
-    If th < THETA_MIN Then th = THETA_MIN
-    If th > THETA_MAX Then th = THETA_MAX
-    CoxTheta = th
+    ' RETIRED: the legacy 3-covariate theta (delta_bep, p_bot, n_stages_ratio) is a
+    ' pre-Phase-C fit, superseded by the operational+completion+cohort hazard layer in
+    ' mdlHazardLayer (ESP_HazardTheta / ESP_dRUL). It always returns 1 so the legacy
+    ' ESP_*_Cox UDFs equal the baseline. The `enabled` flag on ESP_CoxCoeffs now drives
+    ' the NEW layer, not this. To use covariate adjustment, use mdlHazardLayer.
+    CoxTheta = 1#
 End Function
 
 ' ------------------------------------------------------------------
@@ -177,10 +196,10 @@ ErrHandler:
 End Function
 
 ' ------------------------------------------------------------------
-' ESP_B10_Cox -- Cox-adjusted 10th percentile TTF.
-'   =ESP_B10_Cox(field, h2s, contractor, delta_bep, p_bot, n_stages_ratio)
+' ESP_B20_Cox -- (legacy, retired) 20th percentile TTF; CoxTheta=1 -> baseline B20.
+'   =ESP_B20_Cox(field, h2s, contractor, delta_bep, p_bot, n_stages_ratio)
 ' ------------------------------------------------------------------
-Public Function ESP_B10_Cox(ByVal field As String, _
+Public Function ESP_B20_Cox(ByVal field As String, _
                              ByVal h2s As String, _
                              ByVal contractor As String, _
                              ByVal deltaBEP As Double, _
@@ -191,25 +210,25 @@ Public Function ESP_B10_Cox(ByVal field As String, _
     Dim stratumKey As String, isDegen As Boolean
 
     If Not GetParams(field, h2s, contractor, w1, b1, e1, b2, e2, stratumKey, isDegen) Then
-        ESP_B10_Cox = CVErr(xlErrNA) : Exit Function
+        ESP_B20_Cox = CVErr(xlErrNA) : Exit Function
     End If
 
     Dim theta As Double
     theta = CoxTheta(deltaBEP, pBot, nStagesRatio)
 
-    ESP_B10_Cox = LatentQuantile(0.1, w1, b1, _
+    ESP_B20_Cox = LatentQuantile(0.2, w1, b1, _
                                  ApplyCoxEta(e1, b1, theta), _
                                  b2, ApplyCoxEta(e2, b2, theta))
     Exit Function
 ErrHandler:
-    ESP_B10_Cox = CVErr(xlErrValue)
+    ESP_B20_Cox = CVErr(xlErrValue)
 End Function
 
 ' ------------------------------------------------------------------
-' ESP_B90_Cox -- Cox-adjusted 90th percentile TTF.
-'   =ESP_B90_Cox(field, h2s, contractor, delta_bep, p_bot, n_stages_ratio)
+' ESP_B80_Cox -- (legacy, retired) 80th percentile TTF; CoxTheta=1 -> baseline B80.
+'   =ESP_B80_Cox(field, h2s, contractor, delta_bep, p_bot, n_stages_ratio)
 ' ------------------------------------------------------------------
-Public Function ESP_B90_Cox(ByVal field As String, _
+Public Function ESP_B80_Cox(ByVal field As String, _
                              ByVal h2s As String, _
                              ByVal contractor As String, _
                              ByVal deltaBEP As Double, _
@@ -220,18 +239,18 @@ Public Function ESP_B90_Cox(ByVal field As String, _
     Dim stratumKey As String, isDegen As Boolean
 
     If Not GetParams(field, h2s, contractor, w1, b1, e1, b2, e2, stratumKey, isDegen) Then
-        ESP_B90_Cox = CVErr(xlErrNA) : Exit Function
+        ESP_B80_Cox = CVErr(xlErrNA) : Exit Function
     End If
 
     Dim theta As Double
     theta = CoxTheta(deltaBEP, pBot, nStagesRatio)
 
-    ESP_B90_Cox = LatentQuantile(0.9, w1, b1, _
+    ESP_B80_Cox = LatentQuantile(0.8, w1, b1, _
                                  ApplyCoxEta(e1, b1, theta), _
                                  b2, ApplyCoxEta(e2, b2, theta))
     Exit Function
 ErrHandler:
-    ESP_B90_Cox = CVErr(xlErrValue)
+    ESP_B80_Cox = CVErr(xlErrValue)
 End Function
 
 ' ------------------------------------------------------------------

@@ -8,6 +8,7 @@ Usage:
 
 Steps in dependency order:
   1. ingest         → raw__v03_runs, raw__v03_failures
+  1b. equipment_big → raw__equipment_big, feat__run_equipment
   2. daily_merged   → proc__daily_merged
   3. daily_lab      → proc__daily_lab
   4. daily_op       → proc__daily_operating
@@ -44,6 +45,7 @@ def _parse_args() -> argparse.Namespace:
 
 _STEPS: dict[str, str] = {
     "ingest": "scripts.ingest.ingest_v03",
+    "equipment_big": "scripts.ingest.ingest_equipment_big",
     "daily_merged": "scripts.processing.build_daily_merged",
     "daily_lab": "scripts.processing.build_daily_lab",
     "daily_op": "scripts.processing.build_daily_operating",
@@ -58,6 +60,7 @@ _STEPS: dict[str, str] = {
 
 _STEP_ORDER = [
     "ingest",
+    "equipment_big",
     "daily_merged",
     "daily_lab",
     "daily_op",

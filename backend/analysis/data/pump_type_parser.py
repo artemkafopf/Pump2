@@ -35,27 +35,40 @@ import pandas as pd
 # Reviewable diameter mappings  (CONFIRM WITH USER — see OPEN_QUESTIONS)
 # ---------------------------------------------------------------------------
 
-# Russian ЭЦН gabarit → outer-diameter group (mm). The prompt gives 5→92, 5А→103,
-# 6→114; the remainder are the conventional ГОСТ ESP housing sizes but MUST be
-# confirmed against the source workbook before being read as physical diameters.
+# Russian ЭЦН gabarit → housing outer diameter (mm).
+# Verified 2026-07-07 against the standard габарит table (ru.wikipedia.org/wiki/ЭЦН;
+# 5/5А/6 casing constraints cross-checked on the neftegaz.ru tech library) and
+# empirically against the per-run recorded 'Габарит УЭЦН' in
+# WellsArtificialLiftBig.xlsx (2,379 runs joined to raw__v03_runs — see
+# results/wellsbig_review/2026-07-07/).
 GABARIT_OD_MM: dict[str, float] = {
-    "2": 81.0,   # unconfirmed
-    "2A": 86.0,  # unconfirmed
-    "3": 81.0,   # unconfirmed
-    "4": 92.0,   # unconfirmed
-    "5": 92.0,   # from prompt
-    "5A": 103.0,  # from prompt (Cyrillic 5а)
-    "6": 114.0,  # from prompt
-    "6A": 123.0,  # unconfirmed
-    "7": 136.0,  # unconfirmed
+    "2": 55.0,
+    "2A": 69.0,
+    "3": 81.0,
+    "4": 86.0,
+    "5": 92.0,    # casing ID >= 121.7 mm
+    "5A": 103.0,  # casing ID >= 130 mm (Cyrillic 5а)
+    "6": 114.0,   # casing ID >= 148.3 mm
+    "6A": 123.0,
+    "6B": 130.0,  # 6Б — same housing as габарит 7
+    "7": 130.0,
+    "7A": 136.0,
+    "8": 172.0,
+    "9": 185.0,
 }
 
-# Western REDA series letter → outer diameter (inches). Reviewable.
+# Western REDA series letter → housing outer diameter (inches).
+# Verified 2026-07-07 (REDA ESP technology catalog): 538 series = 5.38 in [136.65 mm];
+# 540 series = 5.13 in [130.30 mm] — the naming exception, NOT 5.40; 400 series =
+# 4.00 in [101.6 mm] with a slimline 3.87-in [98.3 mm] housing option. Empirically
+# (recorded габарит), our DN fleet is predominantly the 387 slimline (104 vs 13 runs);
+# GN → 540, SN → 538. Per-model truth:
+# results/wellsbig_review/2026-07-07/tables/pump_size_reference.csv.
 REDA_SERIES_OD_INCH: dict[str, float] = {
-    "A": 3.38,  # unconfirmed
-    "D": 4.00,  # from prompt (≈)
-    "G": 5.13,  # from prompt (≈)
-    "S": 5.38,  # from prompt (≈)
+    "A": 3.38,
+    "D": 3.87,  # 400-series slimline housing — fleet-dominant for DN models
+    "G": 5.13,  # 540 series
+    "S": 5.38,  # 538 series
 }
 
 # bbl/d → m³/d
@@ -63,9 +76,10 @@ BBL_TO_M3 = 0.159
 
 # Open questions surfaced to the report (not silently resolved).
 OPEN_QUESTIONS = (
-    "gabarit→OD (mm) mapping in GABARIT_OD_MM is only confirmed for 5/5A/6; "
-    "the rest are conventional ГОСТ sizes pending workbook confirmation. "
-    "REDA series→OD (inch) in REDA_SERIES_OD_INCH is approximate."
+    "GABARIT_OD_MM and REDA_SERIES_OD_INCH verified 2026-07-07 (sources in comments); "
+    "remaining ambiguity: individual DN models may be 400-series standard (101.6 mm) "
+    "rather than slimline (98.3 mm) — per-model empirical gabarit in "
+    "results/wellsbig_review/2026-07-07/tables/pump_size_reference.csv takes precedence."
 )
 
 # Russian ESP series prefixes (order matters: longest first for greedy match).

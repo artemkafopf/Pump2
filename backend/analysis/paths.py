@@ -94,6 +94,17 @@ def _resolve(*, env_var: str, local_dir: Path, local_name: str, external_default
 DEFAULT_V03_ALL_EXTERNAL = Path(r"D:\Projects\Pumps\data\target\Отказы свод с анализом_БДА_V03_all.xlsx")
 DEFAULT_V03_FAILURES_EXTERNAL = Path(r"D:\Projects\Pumps\data\target\Отказы свод с анализом_БДА_V03_failures.xlsx")
 DEFAULT_PRESENTATION_EXTERNAL = Path(r"C:\Users\alexe\Downloads\Отказность Аналитика(1).pptx")
+DEFAULT_EQUIPMENT_BIG_EXTERNAL = Path(r"D:\Projects\Pumps\data\big\WellsArtificialLiftBig.xlsx")
+
+
+def resolve_equipment_big_path() -> Path:
+    """Equipment-passport workbook (WellsArtificialLiftBig) — one row per спуск."""
+    return _resolve(
+        env_var="PUMP2_EQUIPMENT_BIG_PATH",
+        local_dir=LOCAL_INPUT_DIR,
+        local_name="WellsArtificialLiftBig.xlsx",
+        external_default=DEFAULT_EQUIPMENT_BIG_EXTERNAL,
+    )
 
 
 def resolve_v03_all_path() -> Path:
@@ -176,6 +187,7 @@ __all__ = [
     "DEFAULT_PRESENTATION_EXTERNAL",
     "resolve_v03_all_path",
     "resolve_v03_failures_path",
+    "resolve_equipment_big_path",
     "resolve_presentation_path",
     # sqlite defaults & resolvers
     "DEFAULT_TELEMETRY_EXTERNAL",

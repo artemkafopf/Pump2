@@ -38,6 +38,7 @@ for _p in (str(REPO_ROOT), str(REPO_ROOT / "backend")):
 from analysis.paths import WAREHOUSE_DIR
 from analysis.data.pump_type_parser import parse_pump_type_series
 from analysis.data.chemistry_run_features import CONTRACTOR_MAP, H2S_SOUR_THRESHOLD
+from analysis.features.operational import compute_cycling_features, std_from_moments
 
 WAREHOUSE_DB = WAREHOUSE_DIR / "pump2.db"
 
@@ -142,7 +143,13 @@ def _load_early_window(con: sqlite3.Connection, n_days: int = EARLY_OP_DAYS) -> 
     )
     SELECT row_id,
       AVG(freq)                                   AS freq_mean,
+      AVG(freq * freq)                            AS freq_sqmean,
+      COUNT(freq)                                 AS n_freq_early,
+      AVG(CASE WHEN freq IS NOT NULL
+               THEN (CASE WHEN freq > 55 THEN 100.0 ELSE 0.0 END) END) AS freq_above_55hz_pct_early,
       AVG(load)                                   AS load_mean,
+      AVG(load * load)                            AS load_sqmean,
+      COUNT(load)                                 AS n_load_early,
       AVG(watercut)                               AS watercut_daily,
       AVG(gas_factor)                             AS glf_mean_opdays,
       AVG(CASE WHEN gas_factor > 0 THEN 1.0 ELSE 0.0 END) AS glf_frac_days_gas,
@@ -158,7 +165,17 @@ def _load_early_window(con: sqlite3.Connection, n_days: int = EARLY_OP_DAYS) -> 
     WHERE oprank <= {n_days}
     GROUP BY row_id
     """
-    return pd.read_sql(q, con)
+    early = pd.read_sql(q, con)
+    # within-early-window stds via the sum-of-squares moments (SQLite has no STDDEV)
+    early["freq_std_early"] = [
+        std_from_moments(m, sq, int(n))
+        for m, sq, n in zip(early["freq_mean"], early["freq_sqmean"], early["n_freq_early"])
+    ]
+    early["load_std_early"] = [
+        std_from_moments(m, sq, int(n))
+        for m, sq, n in zip(early["load_mean"], early["load_sqmean"], early["n_load_early"])
+    ]
+    return early.drop(columns=["freq_sqmean", "load_sqmean"])
 
 
 def _load_early_chemistry(con: sqlite3.Connection, n_days: int = EARLY_OP_DAYS) -> pd.DataFrame:
@@ -256,20 +273,15 @@ def _load_sequence_features(con: sqlite3.Connection) -> pd.DataFrame:
     )
     rows = []
     for row_id, g in df.groupby("row_id", sort=False):
-        span = max(len(g), 1)
-        freq = g["freq"].to_numpy(dtype=float)
-        freq_valid = freq[~np.isnan(freq)]
-        freq_std = float(np.std(freq_valid)) if len(freq_valid) >= 3 else np.nan
-        dfreq = np.abs(np.diff(freq))
-        n_steps = int(np.nansum(dfreq > 1.0))
-        q = g["qliq"].fillna(0).to_numpy(dtype=float)
-        on = (q > 0).astype(int)
-        restarts = int(np.sum((np.diff(on) == 1)))
+        feats = compute_cycling_features(
+            g["qliq"].to_numpy(dtype=float),
+            g["freq"].to_numpy(dtype=float),
+            span_days=len(g),
+        )
         rows.append({
             "row_id": row_id,
-            "freq_std": round(freq_std, 3) if np.isfinite(freq_std) else np.nan,
-            "n_freq_steps_per_100d": round(100.0 * n_steps / span, 3),
-            "n_restarts_per_100d": round(100.0 * restarts / span, 3),
+            "n_freq_steps_per_100d": feats["n_freq_steps_per_100d"],
+            "n_restarts_per_100d": feats["n_restarts_per_100d"],
         })
     return pd.DataFrame(rows)
 
@@ -309,8 +321,9 @@ _IMPUTE_COLS = [
     "h2s_proxy_mg_l", "mechanical_impurities_mg_l", "watercut_daily",
     "glf_mean_opdays",
     # Block 2 operational
-    "freq_mean", "load_mean", "kpod_mean", "kpod_freq_mean",
-    "pzab_over_pbubble", "rpump_intake_mean", "freq_std",
+    "freq_mean", "freq_std_early", "freq_above_55hz_pct_early",
+    "load_mean", "load_std_early", "kpod_mean", "kpod_freq_mean",
+    "pzab_over_pbubble", "rpump_intake_mean",
     # Block 3 completion
     "stages", "head_per_stage", "motor_power_kw", "nominal_current_a",
     "nominal_flow_m3d", "curvature", "vg_m", "pbubble_atm", "nominal_freq_hz",
@@ -365,6 +378,14 @@ def build_run_covariates(tte_col: str = "ttf_mix") -> pd.DataFrame:
 
     # ── Block 3 derived completion features ───────────────────────────────────
     df["curvature"] = pd.to_numeric(df["curvature_flag"], errors="coerce")  # '-' → NaN
+    # «Работа в кривизне» is recorded only when the ESP operates BEYOND the setting-
+    # interval curvature norm (3°/100 m = 0.3°/10 m — recorded values start at exactly
+    # 0.30, zero zeros observed; identical column in WellsArtificialLiftBig confirms).
+    # Blank therefore means "within norm", not "unknown": curvature_filled encodes it
+    # as 0 and the within-norm flag is kept (user decision 2026-07-08). Units °/10 m —
+    # consistent with the 0.30 floor and p99 ≈ 2.3; owner confirmation still pending.
+    df["curvature_filled"] = df["curvature"].fillna(0.0)
+    df["curvature_within_norm"] = df["curvature"].isna().astype(np.int8)
     df["head_per_stage"] = df["nominal_head_50hz_m"] / df["stages"].replace(0, np.nan)
     parsed = parse_pump_type_series(df["pump_type"])
     df["pump_series"] = parsed["pump_series"]
@@ -377,10 +398,24 @@ def build_run_covariates(tte_col: str = "ttf_mix") -> pd.DataFrame:
     df["install_dt"] = pd.to_datetime(df["install_date"], errors="coerce")
     df["stop_dt"] = pd.to_datetime(df["stop_date"], errors="coerce")
     df["install_year"] = df["install_dt"].dt.year
+    # install_period: technology / telemetry vintage bins (mandatory adjuster).
+    df["install_period"] = pd.cut(
+        df["install_year"], bins=[-np.inf, 2019, 2022, np.inf],
+        labels=["<=2019", "2020-2022", "2023+"],
+    ).astype("object")
+    # Numeric dummies (ref = 2020-2022) for estimators that take plain covariate
+    # lists rather than a Patsy formula (e.g. cause_specific_cox).
+    df["install_pre2020"] = (df["install_period"] == "<=2019").astype(np.int8)
+    df["install_2023plus"] = (df["install_period"] == "2023+").astype(np.int8)
     df = df.sort_values(["well_key", "install_dt"]).reset_index(drop=True)
     df["run_seq"] = df.groupby("well_key").cumcount() + 1
+    df["log_run_seq"] = np.log1p(df["run_seq"])
     prev_stop = df.groupby("well_key")["stop_dt"].shift(1)
     df["days_since_prev_failure"] = (df["install_dt"] - prev_stop).dt.days
+    df["log_days_since_prev_failure"] = np.log1p(
+        df["days_since_prev_failure"].clip(lower=0))
+    # has_telemetry: Phase A T4 — telemetry absence is informative, not random.
+    df["has_telemetry"] = (df["ttf_true_source"] != "missing").astype(np.int8)
 
     # ── idle_frac (whole_run; unavoidable) ────────────────────────────────────
     with np.errstate(invalid="ignore", divide="ignore"):

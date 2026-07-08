@@ -32,6 +32,19 @@ class RunCovariatesBuilderTests(unittest.TestCase):
             self.assertIn(f"{col}_missing", self.df.columns)
             self.assertIn(f"{col}_imputed_src", self.df.columns)
 
+    def test_phase_c_features_and_adjusters(self):
+        # C0 early-window instability/exposure features
+        for col in ("freq_std_early", "load_std_early", "freq_above_55hz_pct_early"):
+            self.assertIn(col, self.df.columns)
+        # mandatory adjusters
+        self.assertIn("install_period", self.df.columns)
+        self.assertEqual(set(self.df["install_period"].dropna().unique())
+                         <= {"<=2019", "2020-2022", "2023+"}, True)
+        self.assertEqual(set(self.df["has_telemetry"].unique()) <= {0, 1}, True)
+        # has_telemetry mirrors ttf_true_source == 'missing'
+        self.assertEqual(int((self.df["has_telemetry"] == 0).sum()),
+                         int((self.df["ttf_true_source"] == "missing").sum()))
+
     def test_log_transforms_finite(self):
         for col in ("log_chloride_mg_l", "log_motor_power_kw"):
             self.assertIn(col, self.df.columns)

@@ -84,9 +84,12 @@ class RedaTests(unittest.TestCase):
         self.assertTrue(p.parsed)
 
     def test_dn_series_od(self):
+        # DN fleet is predominantly the 400-series slimline 3.87-in [98.3 mm] housing
+        # (verified 2026-07-07 against recorded габарит in WellsArtificialLiftBig;
+        # DN3500 itself: 29 joined runs, 86% series-387).
         p = parse_pump_type("DN3500")
         self.assertEqual(p.pump_series_detail, "DN")
-        self.assertAlmostEqual(p.od_group_mm, round(4.00 * 25.4, 1))
+        self.assertAlmostEqual(p.od_group_mm, round(3.87 * 25.4, 1))
 
     def test_single_letter_reda(self):
         p = parse_pump_type("DN460")
