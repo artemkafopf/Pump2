@@ -75,8 +75,12 @@ Public Sub RunProductionRisk()
     ws.Range("B13").Value = outputFolder
     ThisWorkbook.Save
 
-    If fso.FolderExists(outputFolder) Then shell.Run "explorer.exe " & QuoteArg(outputFolder), 1, False
-    MsgBox "Forecast completed successfully." & vbCrLf & outputFolder, vbInformation, "Pump2"
+    ' UI (explorer + message box) only when running interactively — Application.Interactive
+    ' is False under headless COM automation, so unattended/CI runs do not block on a dialog.
+    If Application.Interactive Then
+        If fso.FolderExists(outputFolder) Then shell.Run "explorer.exe " & QuoteArg(outputFolder), 1, False
+        MsgBox "Forecast completed successfully." & vbCrLf & outputFolder, vbInformation, "Pump2"
+    End If
     Exit Sub
 
 Failed:
@@ -87,5 +91,5 @@ Failed:
         ws.Range("B11").Value = Now
     End If
     ThisWorkbook.Save
-    MsgBox errorMessage, vbCritical, "Pump2 forecast"
+    If Application.Interactive Then MsgBox errorMessage, vbCritical, "Pump2 forecast"
 End Sub
