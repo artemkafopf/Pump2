@@ -11,13 +11,27 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from datetime import date as _date
 from pathlib import Path
 
 
 # ── repo roots ────────────────────────────────────────────────────────────────
 
-REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+def _app_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+def _resource_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)).resolve()
+    return Path(__file__).resolve().parents[2]
+
+
+REPO_ROOT: Path = _app_root()
+RESOURCE_ROOT: Path = _resource_root()
 
 # ── data layer ────────────────────────────────────────────────────────────────
 
@@ -134,6 +148,77 @@ def resolve_presentation_path() -> Path:
     )
 
 
+# ── production / development plan (ПП) inputs ─────────────────────────────────
+
+DEFAULT_PP_MASTER_EXTERNAL = Path(
+    r"D:\Projects\Pumps\data\pp\ТМ-06_2026_2027_Р50_Базовый_Мастер файл.xlsx"
+)
+DEFAULT_GTM_SCHEDULE_EXTERNAL = Path(
+    r"D:\Projects\Pumps\data\pp\М08 2025 (СД 2026 - 2027)\ДФ_04.xlsx"
+)
+DEFAULT_PREDICTION_TARGET_DIR = Path(r"D:\Projects\Pumps\data\target")
+DEFAULT_TECHREGIME_WORKBOOK_EXTERNAL = Path(r"D:\Projects\Pumps\data\tr\ТР_НЕФТЬ 30.06.2026.xlsm")
+
+
+def resolve_pp_master_path() -> Path:
+    """Production-plan master file (Реестр: monthly per-well rates, MAP registry)."""
+    return _resolve(
+        env_var="PUMP2_PP_MASTER_PATH",
+        local_dir=LOCAL_INPUT_DIR,
+        local_name="ТМ-06_2026_2027_Р50_Базовый_Мастер файл.xlsx",
+        external_default=DEFAULT_PP_MASTER_EXTERNAL,
+    )
+
+
+def resolve_gtm_schedule_path() -> Path:
+    """ГТМ intervention schedule (ДФ_04: planned jobs, dates, ЭЦН flag, КРС durations)."""
+    return _resolve(
+        env_var="PUMP2_GTM_SCHEDULE_PATH",
+        local_dir=LOCAL_INPUT_DIR,
+        local_name="ДФ_04.xlsx",
+        external_default=DEFAULT_GTM_SCHEDULE_EXTERNAL,
+    )
+
+
+def resolve_prediction_workbook_path() -> Path:
+    """Newest deployed simple-prediction workbook, else fall back to V03_all.
+
+    Preference order:
+      1. explicit env var / local mirror
+      2. newest non-backup simple_prediction workbook under the target folder
+      3. V03_all workbook
+    """
+    env_value = os.environ.get("PUMP2_PREDICTION_WORKBOOK_PATH", "").strip()
+    if env_value:
+        return Path(env_value)
+    local_path = LOCAL_INPUT_DIR / "Отказы свод с анализом_БДА_V03_simple_prediction.xlsm"
+    if local_path.exists():
+        return local_path
+    if DEFAULT_PREDICTION_TARGET_DIR.exists():
+        candidates = list(DEFAULT_PREDICTION_TARGET_DIR.glob("*simple_prediction*.xlsm"))
+        if candidates:
+            def _rank(p: Path) -> tuple[int, int, int, float]:
+                name = p.name.lower()
+                is_backup = 1 if ".backup" in name else 0
+                is_30d = 1 if "30d" in name else 0
+                not_90d = 1 if ("90d" not in name and "simple_prediction" in name) else 0
+                return (is_backup, is_30d, not_90d, -p.stat().st_mtime)
+
+            candidates.sort(key=_rank)
+            return candidates[0]
+    return resolve_v03_all_path()
+
+
+def resolve_techregime_workbook_path() -> Path:
+    """Current techregime workbook with fund status as of the report date."""
+    return _resolve(
+        env_var="PUMP2_TECHREGIME_WORKBOOK_PATH",
+        local_dir=LOCAL_INPUT_DIR,
+        local_name="ТР_НЕФТЬ 30.06.2026.xlsm",
+        external_default=DEFAULT_TECHREGIME_WORKBOOK_EXTERNAL,
+    )
+
+
 # ── sqlite databases ──────────────────────────────────────────────────────────
 
 DEFAULT_TELEMETRY_EXTERNAL = Path(r"D:\Projects\Pumps\data\telemetry\telemetry.sqlite")
@@ -189,6 +274,13 @@ __all__ = [
     "resolve_v03_failures_path",
     "resolve_equipment_big_path",
     "resolve_presentation_path",
+    "DEFAULT_PP_MASTER_EXTERNAL",
+    "DEFAULT_GTM_SCHEDULE_EXTERNAL",
+    "DEFAULT_TECHREGIME_WORKBOOK_EXTERNAL",
+    "resolve_pp_master_path",
+    "resolve_gtm_schedule_path",
+    "resolve_prediction_workbook_path",
+    "resolve_techregime_workbook_path",
     # sqlite defaults & resolvers
     "DEFAULT_TELEMETRY_EXTERNAL",
     "DEFAULT_TECHREGIME_EXTERNAL",

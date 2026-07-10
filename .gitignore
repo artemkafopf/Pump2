@@ -27,3 +27,7 @@ catboost_info/
 # Archive of legacy artifacts and unrelated sub-projects.
 archive/
 
+
+# PyInstaller build artifacts
+build/
+dist/
