@@ -12,4 +12,13 @@ Private Sub Workbook_Open()
     Call LoadModelRegistry
     Call LoadModeMix        ' Phase B mode-mix planning layer (ESP_ModeMix)
     Call LoadHazardLayer    ' operational + completion overlay (ESP_CoxCoeffs/ESP_RunCov)
+
+    ' Force a full recalc so cached UDF errors do not remain visible on open.
+    On Error Resume Next
+    Application.CalculateFull
+
+    ' If the simplified forecast sheets exist, refresh their history-derived fields.
+    CalculateSimplePrediction
+    CalculateMultiPrediction
+    On Error GoTo 0
 End Sub

@@ -37,6 +37,7 @@ MODULE_NAMES = [
     "mdlPublicFunctions",
     "mdlCoxHR",
     "mdlHazardLayer",
+    "mdlSimplePrediction",
     "mdlBatchProcess",
     "mdlValidation",
     "mdlModelSeed",
