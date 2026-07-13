@@ -763,6 +763,8 @@ def _line_chart(title: str, ws, *, cat_ref, obs_ref, pred_ref,
     chart.x_axis = DateAxis(axId=10, crossAx=100)
     chart.y_axis.axId = 100
     chart.y_axis.crossAx = 10
+    chart.x_axis.axPos = "b"   # DateAxis defaults to "l"; the x-axis must sit at the bottom
+    chart.y_axis.axPos = "l"
     chart.x_axis.number_format = "yyyy-mm"
     chart.x_axis.majorTimeUnit = "months"
     chart.x_axis.baseTimeUnit = "months"
@@ -823,11 +825,14 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
     ws.append([])
 
     # ---- wide rate matrix: month | <field>_факт | <field>_прогноз ... ----
-    header_row = ws.max_row + 1
     header = ["Месяц"]
     for field in fields:
         header += [f"{field} · факт", f"{field} · прогноз"]
     ws.append(header)
+    # Anchor to where the header actually landed: ws.append([]) above writes an
+    # empty row that ws.max_row does not count, so max_row+1 is off by one and the
+    # chart refs would start on the header (a text cell → a spurious leading zero).
+    header_row = ws.max_row
     for i, month in enumerate(months):
         # Column A is a real date (first of month) so the charts can use a date
         # axis and clip the visible range without dropping data points.
