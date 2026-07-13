@@ -26,14 +26,25 @@ from analysis.paths import resolve_equipment_big_path, resolve_prediction_workbo
 from analysis.workflows.production_risk import config as C
 from analysis.workflows.production_risk import crosswalk
 
-MC_PREFIXES = {"MC", "MR", "NE"}
-# The initial 2023+ K=2 refit still underpredicted Мирнинский in the downstream
-# fact/pred check.  The shipped row uses the new-vintage regime (2024+), while
-# the report still includes all-history comparison.
+# Only the two Мирнинский pads (Mc, Mr) — NE/Непский is geologically distinct and
+# is no longer force-mapped to Mc (see config.EXPLICIT_GLOBAL_FALLBACK).
+MC_PREFIXES = {"MC", "MR"}
+# New-vintage regime.  KM on Big Mc+Mr runs shows install-2024 and install-2025+
+# cohorts share a ~240-day median TTF, distinct from the ~480-day ≤2023 cohort;
+# the current fleet is dominated by that new vintage, so the shipped row is fit on
+# installs from RECENCY_START.  The all-history fit is still reported for contrast.
+# 2024+ (not 2025+) is used deliberately: the two new-vintage cohorts fit to the
+# same b50 (~216 vs ~224 op-days), so 2024+ is preferred for its larger sample
+# (160 vs 95 failures) and tighter b50 CI.  The residual Мирнинский under-count is
+# an idle/workover-month failure pattern, not a fit-window artifact — a faster
+# window does not close it.
 RECENCY_START = pd.Timestamp("2024-01-01")
 DEFAULT_CUTOFF = pd.Timestamp("2026-06-30")
 SOURCE_BUNDLE_DATE = "2026-07-08"
 TARGET_BUNDLE_DATE = "2026-07-13"
+# Both old Mc rows are removed; only Mc_nonsour_Pooled is re-emitted.  Contractor
+# variants (brt/slb/oth) then cascade to the pooled fit via StrataModel.resolve —
+# Mc data is too thin to justify a separate per-contractor Weibull.
 TARGET_STRATA = ("Mc_nonsour_Pooled", "Mc_nonsour_brt")
 
 
@@ -242,36 +253,39 @@ def _fit_frame(df: pd.DataFrame, label: str) -> tuple[dict, TwoComponentLatentWe
 
 
 def _registry_rows(fit_row: dict, source_rows: pd.DataFrame, fit_date: str) -> list[dict]:
-    out: list[dict] = []
-    for stratum, ctr in (("Mc_nonsour_Pooled", "Pooled"), ("Mc_nonsour_brt", "brt")):
-        row = source_rows[source_rows["stratum"] == stratum].iloc[0].to_dict()
-        row.update(
-            {
-                "stratum": stratum,
-                "field": "Mc",
-                "h2s_class": "nonsour",
-                "contractor_group": ctr,
-                "model_kind": fit_row["model_kind"],
-                "w1": round(float(fit_row["w1"]), 6),
-                "beta1": round(float(fit_row["beta1"]), 6),
-                "eta1": round(float(fit_row["eta1"]), 2),
-                "beta2": round(float(fit_row["beta2"]), 6),
-                "eta2": round(float(fit_row["eta2"]), 2),
-                "b20": round(float(fit_row["b20"]), 1),
-                "b50": round(float(fit_row["b50"]), 1),
-                "b80": round(float(fit_row["b80"]), 1),
-                "b50_lo": fit_row.get("b50_lo", ""),
-                "b50_hi": fit_row.get("b50_hi", ""),
-                "uptime_factor": 0.7450,
-                "n_runs": int(fit_row["n_runs"]),
-                "n_failures": int(fit_row["n_failures"]),
-                "pct_mixed_clock": "",
-                "clock": "ttf_mix",
-                "fit_date": fit_date,
-            }
-        )
-        out.append(row)
-    return out
+    """Build the single replacement row (Mc_nonsour_Pooled).
+
+    Only the pooled row is emitted; brt/slb/oth Mc wells resolve to it via the
+    StrataModel cascade.  Emitting a per-contractor copy would duplicate the same
+    numbers under a misleading ``contractor_group`` and ``n_runs`` label.
+    """
+    row = source_rows[source_rows["stratum"] == "Mc_nonsour_Pooled"].iloc[0].to_dict()
+    row.update(
+        {
+            "stratum": "Mc_nonsour_Pooled",
+            "field": "Mc",
+            "h2s_class": "nonsour",
+            "contractor_group": "Pooled",
+            "model_kind": fit_row["model_kind"],
+            "w1": round(float(fit_row["w1"]), 6),
+            "beta1": round(float(fit_row["beta1"]), 6),
+            "eta1": round(float(fit_row["eta1"]), 2),
+            "beta2": round(float(fit_row["beta2"]), 6),
+            "eta2": round(float(fit_row["eta2"]), 2),
+            "b20": round(float(fit_row["b20"]), 1),
+            "b50": round(float(fit_row["b50"]), 1),
+            "b80": round(float(fit_row["b80"]), 1),
+            "b50_lo": fit_row.get("b50_lo", ""),
+            "b50_hi": fit_row.get("b50_hi", ""),
+            "uptime_factor": 0.7450,
+            "n_runs": int(fit_row["n_runs"]),
+            "n_failures": int(fit_row["n_failures"]),
+            "pct_mixed_clock": "",
+            "clock": "ttf_mix",
+            "fit_date": fit_date,
+        }
+    )
+    return [row]
 
 
 def run(
@@ -346,7 +360,8 @@ def run(
         f"(bootstrap reliable: `{recent_row.get('b50_ci_reliable')}`)",
         f"- delta_aic: `{recent_row['delta_aic']:.1f}`",
         "",
-        "Rows replaced in `esp_models.csv`: `Mc_nonsour_Pooled`, `Mc_nonsour_brt`.",
+        "Rows in `esp_models.csv`: `Mc_nonsour_Pooled` replaced; old `Mc_nonsour_brt` "
+        "dropped (brt now cascades to the pooled fit).",
         "",
     ]
     (report_dir / "reports" / "mc_refit_summary.md").write_text("\n".join(report), encoding="utf-8")

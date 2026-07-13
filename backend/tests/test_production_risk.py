@@ -486,14 +486,16 @@ def test_techregime_age_used_for_stale_and_new_wells():
 def test_model_prefix_mapping_and_explicit_global_fallback():
     from analysis.workflows.production_risk import crosswalk
 
+    # MR (Мирнинский Мр pad) is the one non-legacy prefix we map — it is the same
+    # field/stratum as Mc and the driver of the refit.
     assert crosswalk.map_model_field_from_well("MR_1001") == "Mc"
-    assert crosswalk.map_model_field_from_well("NE_1001") == "Mc"
-    assert crosswalk.map_model_field_from_well("AM_1001") == "Za"
-    assert crosswalk.map_model_field_from_well("YAY_1") == "Ya"
-    assert crosswalk.map_model_field_from_well("ZYI_1") == "Za"
-    assert crosswalk.map_model_field_from_well("KI_1") is None
-    assert crosswalk.is_explicit_global_fallback("KI_1")
-    assert crosswalk.is_explicit_global_fallback("BT_1")
+    # Established legacy mappings still resolve.
+    assert crosswalk.map_model_field_from_well("VT_1001") == "Vt"
+    assert crosswalk.map_model_field_from_well("AU_1001") == "Za"
+    # Minor / unclear prefixes are intentionally pooled, not force-mapped.
+    for code in ("NE_1001", "AM_1001", "YAY_1", "ZYI_1", "KI_1", "BT_1", "MSH_1"):
+        assert crosswalk.map_model_field_from_well(code) is None
+        assert crosswalk.is_explicit_global_fallback(code)
 
 
 def test_strata_model_exposes_uptime_factor(tmp_path: Path):

@@ -50,22 +50,18 @@ HAZARD_SHIP_REASON = "physical_sensitivity_not_oos_validated"
 
 FIELD_PREFIX_MAP = {
     "YA": "Ya",
-    "YAY": "Ya",
     "VT": "Vt",
     "VTI": "Vt",
     "VTB": "Vt",
     "VTBB": "Vt",
     "IC": "Ic",
     "MC": "Mc",
-    "MR": "Mc",
-    "NE": "Mc",
+    "MR": "Mc",   # Мирнинский Мр pad — same field/stratum as Mc, the driver of this refit.
     "AZ": "Az",
     "AZA": "Az",
-    "AM": "Za",
     "AU": "Za",
     "AUY": "Za",
     "AUZ": "Za",
-    "ZYI": "Za",
     "DA": "Da",
     "DAD": "Da",
 }
@@ -77,6 +73,12 @@ EXPLICIT_GLOBAL_FALLBACK = {
     "BT",   # Большетирский: material Big history, but no defensible existing field stratum.
     "KI",   # Кийский: no existing Ki stratum in the shipped Weibull registry.
     "MSH",  # Мышевского / Кийский area: no existing Msh/Ki stratum.
+    # Minor / unclear prefixes: too few wells to justify borrowing another field's
+    # Weibull, so pooled rather than force-mapped (see failure-rate review).
+    "NE",   # Непский — geologically distinct from Мирнинский; do not model as Mc.
+    "AM",
+    "ZYI",
+    "YAY",  # single well; not clearly the Ya stratum.
 }
 
 DEFAULT_FACT_THROUGH_MONTH = "2026-04"

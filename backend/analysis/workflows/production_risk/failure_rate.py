@@ -51,11 +51,18 @@ from analysis.workflows.production_risk.survival import StrataModel, current_pum
 GLOBAL_LABEL = "ГЛОБАЛЬНО"
 RATE_SHEET = "Интенсивность отказов"
 DATA_SHEET = "Отказы_данные"
-DISPLAY_FIRST_MONTH = "2024-01"
 HISTORY_FIRST_MONTH = "2018-01"
+# Charts span the full modelled history so the installation-driven model line is
+# visible throughout, not just from the plan window.  The factual line only starts
+# at FACT_DISPLAY_FIRST_MONTH — earlier actual coverage for the current master
+# fleet is incomplete, so plotting it would mislead.
+DISPLAY_FIRST_MONTH = HISTORY_FIRST_MONTH
+FACT_DISPLAY_FIRST_MONTH = "2024-01"
 # Chart materiality only affects the visual grid.  The wide rate matrix and the
 # long audit sheet still include every УН so totals and auditability are intact.
-CHART_MIN_TOTAL_FAILURES = 20.0
+# Threshold is on mean active fleet, not a failure count, so a full-history span
+# does not promote a tiny long-lived field just for accumulating failures slowly.
+CHART_MIN_MEAN_FLEET = 12.0
 
 
 @dataclass
@@ -269,35 +276,6 @@ def _active_producing_mask(plan, months: list[str]) -> pd.DataFrame:
     oil = plan.oil_volume.reindex(index=op.index, columns=months, fill_value=0.0)
     liq = plan.liquid_volume.reindex(index=op.index, columns=months, fill_value=0.0)
     return (op > 0) & ((oil > 0) | (liq > 0))
-
-
-def _segment_month_slices(plan, active: pd.DataFrame, wid: str, months: list[str],
-                          start: datetime, end: datetime) -> list[tuple[str, float, float]]:
-    """Return (month, calendar overlap days, planned op-days) for an active segment."""
-    op_frame = getattr(plan, "op_days", plan.op_days_raw)
-    if wid not in op_frame.index or start >= end:
-        return []
-    out: list[tuple[str, float, float]] = []
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    for month in months:
-        m_start = pd.Period(month, freq="M").start_time
-        m_end = m_start + pd.offsets.MonthBegin(1)
-        ov_start = max(start_ts, m_start)
-        ov_end = min(end_ts, m_end)
-        overlap = float((ov_end - ov_start).days)
-        if overlap <= 0:
-            continue
-        if wid not in active.index or month not in active.columns or not bool(active.at[wid, month]):
-            continue
-        cal_days = float(
-            getattr(plan, "cal_days", pd.Series(dtype=float)).get(month, pd.Period(month, freq="M").days_in_month)
-        )
-        month_op = float(op_frame.at[wid, month]) if month in op_frame.columns else 0.0
-        op_days = month_op * overlap / cal_days if cal_days > 0 else 0.0
-        if op_days > 0:
-            out.append((month, overlap, op_days))
-    return out
 
 
 def _join_key(code: str) -> str:
@@ -687,17 +665,25 @@ def compute(
         beyond = monthly["month"] > last_obs_month
         monthly.loc[beyond, "observed_rate"] = np.nan
         monthly.loc[beyond, "observed_failures"] = np.nan
+    # Factual is only shown from FACT_DISPLAY_FIRST_MONTH; earlier actual coverage
+    # for the current master fleet is incomplete, so blank it (the installation-
+    # driven model line still spans the full history).
+    before_fact = monthly["month"] < FACT_DISPLAY_FIRST_MONTH
+    monthly.loc[before_fact, "observed_rate"] = np.nan
+    monthly.loc[before_fact, "observed_failures"] = np.nan
 
     fields_present = [f for f in monthly["field"].unique() if f != GLOBAL_LABEL]
     fields = [GLOBAL_LABEL] + sorted(fields_present)
     display_mask = monthly["month"].isin(display_months)
-    material = (
+    # Materiality: mean active fleet over the displayed span.  Fleet size is stable
+    # and interpretable, unlike a failure count that grows with the span length and
+    # would promote tiny long-lived fields on a full-history chart.
+    mean_fleet = (
         monthly[display_mask & (monthly["field"] != GLOBAL_LABEL)]
-        .assign(total_failures=lambda d: d["observed_failures"].fillna(0.0) + d["predicted_failures"].fillna(0.0))
-        .groupby("field")["total_failures"]
-        .sum()
+        .groupby("field")["fleet_size"]
+        .mean()
     )
-    chart_fields = [GLOBAL_LABEL] + [f for f in sorted(fields_present) if float(material.get(f, 0.0)) >= CHART_MIN_TOTAL_FAILURES]
+    chart_fields = [GLOBAL_LABEL] + [f for f in sorted(fields_present) if float(mean_fleet.get(f, 0.0)) >= CHART_MIN_MEAN_FLEET]
     monthly = monthly.sort_values(["field", "month"]).reset_index(drop=True)
 
     master_wells = set(well_field)
@@ -723,7 +709,8 @@ def compute(
         "fleet_denominator": fleet_info.get("denominator_basis", ""),
         "display_first_month": DISPLAY_FIRST_MONTH,
         "history_first_month": HISTORY_FIRST_MONTH,
-        "chart_min_total_failures": CHART_MIN_TOTAL_FAILURES,
+        "fact_display_first_month": FACT_DISPLAY_FIRST_MONTH,
+        "chart_min_mean_fleet": CHART_MIN_MEAN_FLEET,
         "chart_fields": chart_fields,
         "global_pooled_share_by_field": fallback_share_by_field,
         **fleet_info,
@@ -788,17 +775,19 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
     ws = workbook.create_sheet(RATE_SHEET)
     ws.append(["Интенсивность отказов УЭЦН — факт vs прогноз модели (по УН и по флоту)"])
     ws.append([
-        "Интенсивность = отказы / активный добывающий парк "
-        "(до плана — активные интервалы Big/Свод; в плане — «Отработанное время» > 0 "
-        "и добыча нефти или жидкости > 0 в «Сводные данные»). "
-        f"Факт — по «Свод» (Failure Flag=1). Прогноз модели (Weibull) по датам монтажа насосов; "
-        f"с {result.forecast_first_month} — прогнозный горизонт."
+        "Интенсивность = отказы / парк в работе. Знаменатель: история — активные "
+        "интервалы УЭЦН (Big/Свод); прогноз (с "
+        f"{result.forecast_first_month}) — активный добывающий парк плана "
+        "(«Отработанное время» > 0 и добыча нефти или жидкости > 0). "
+        f"Факт — по «Свод» (Failure Flag=1), показан с "
+        f"{result.coverage.get('fact_display_first_month', FACT_DISPLAY_FIRST_MONTH)}. "
+        "Прогноз модели (Weibull) по датам монтажа насосов — на всю историю."
     ])
     ws.append([f"Покрытие: master={int(result.coverage['master_wells'])}, "
                f"Свод={int(result.coverage['svod_wells'])}, "
                f"Свод∩master={int(result.coverage['svod_in_master'])}, "
                f"последний факт-месяц={result.coverage['last_observed_month']}"])
-    ws.append([f"Графики: только УН с факт+прогноз отказов >= {CHART_MIN_TOTAL_FAILURES:g}; "
+    ws.append([f"Графики: только УН со средним парком >= {CHART_MIN_MEAN_FLEET:g} скв.; "
                "таблица и аудит содержат все УН."])
     ws.append([])
 
