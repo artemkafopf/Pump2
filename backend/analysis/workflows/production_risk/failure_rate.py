@@ -41,7 +41,7 @@ import numpy as np
 import pandas as pd
 
 from openpyxl.chart import LineChart, Reference, Series
-from openpyxl.chart.axis import ChartLines
+from openpyxl.chart.axis import ChartLines, DateAxis
 from openpyxl.utils import get_column_letter
 
 from analysis.workflows.production_risk import config as C
@@ -742,13 +742,30 @@ def _rate_matrix(result: FailureRateResult, value: str) -> pd.DataFrame:
     return pivot
 
 
-def _line_chart(title: str, ws, *, cat_ref, obs_ref, pred_ref) -> LineChart:
+def _excel_serial(month: str) -> int:
+    """Excel 1900-system serial for the first day of ``month`` (YYYY-MM)."""
+    d = datetime(int(month[:4]), int(month[5:7]), 1)
+    return (d - datetime(1899, 12, 30)).days
+
+
+def _line_chart(title: str, ws, *, cat_ref, obs_ref, pred_ref,
+                view_min: int | None = None, view_max: int | None = None) -> LineChart:
     chart = LineChart()
     chart.title = title
     chart.style = 2
     chart.height = 7.5
     chart.width = 16
     chart.y_axis.title = "отказов / скв. в мес"
+    # Date axis: the series carry the full modelled history, but the visible window
+    # is clipped to [view_min, view_max] so the model line enters at its real
+    # mid-life value instead of appearing to start from zero.  The category cells
+    # are dates (first of month), so this limits the view without touching the data.
+    chart.x_axis = DateAxis(axId=10, crossAx=100)
+    chart.y_axis.axId = 100
+    chart.y_axis.crossAx = 10
+    chart.x_axis.number_format = "yyyy-mm"
+    chart.x_axis.majorTimeUnit = "months"
+    chart.x_axis.baseTimeUnit = "months"
     chart.x_axis.title = "Месяц"
     chart.x_axis.delete = False
     chart.y_axis.delete = False
@@ -756,6 +773,10 @@ def _line_chart(title: str, ws, *, cat_ref, obs_ref, pred_ref) -> LineChart:
     chart.y_axis.majorGridlines = ChartLines()
     chart.x_axis.tickLblPos = "low"
     chart.x_axis.txPr = None
+    if view_min is not None:
+        chart.x_axis.scaling.min = view_min
+    if view_max is not None:
+        chart.x_axis.scaling.max = view_max
 
     s_obs = Series(obs_ref, title="Факт")
     s_obs.graphicalProperties.line.width = 20000
@@ -774,8 +795,13 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
     obs = _rate_matrix(result, "observed_rate")
     pred = _rate_matrix(result, "predicted_rate")
     fields = result.fields
-    months = result.display_months
+    # The table and chart series carry the FULL modelled history; the charts clip
+    # the visible x-axis to the display window (see _line_chart).  The factual rate
+    # is already blank before FACT_DISPLAY_FIRST_MONTH, so no factual is drawn there.
+    months = result.months
     n = len(months)
+    view_min = _excel_serial(result.display_months[0]) if result.display_months else None
+    view_max = _excel_serial(result.display_months[-1]) if result.display_months else None
 
     ws = workbook.create_sheet(RATE_SHEET)
     ws.append(["Интенсивность отказов УЭЦН — факт vs прогноз модели (по УН и по флоту)"])
@@ -793,7 +819,7 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
                f"Свод∩master={int(result.coverage['svod_in_master'])}, "
                f"последний факт-месяц={result.coverage['last_observed_month']}"])
     ws.append([f"Графики: только УН со средним парком >= {CHART_MIN_MEAN_FLEET:g} скв.; "
-               "таблица и аудит содержат все УН."])
+               f"модель — вся история, ось графиков — с {result.display_months[0] if result.display_months else ''}."])
     ws.append([])
 
     # ---- wide rate matrix: month | <field>_факт | <field>_прогноз ... ----
@@ -803,7 +829,9 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
         header += [f"{field} · факт", f"{field} · прогноз"]
     ws.append(header)
     for i, month in enumerate(months):
-        row = [month]
+        # Column A is a real date (first of month) so the charts can use a date
+        # axis and clip the visible range without dropping data points.
+        row = [datetime(int(month[:4]), int(month[5:7]), 1)]
         for field in fields:
             ov = obs.at[month, field] if field in obs.columns else np.nan
             pv = pred.at[month, field] if field in pred.columns else np.nan
@@ -812,6 +840,7 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
     first_data_row = header_row + 1
     last_data_row = header_row + n
     for r in range(first_data_row, last_data_row + 1):
+        ws.cell(row=r, column=1).number_format = "yyyy-mm"
         for c in range(2, 2 + 2 * len(fields)):
             ws.cell(row=r, column=c).number_format = "0.0000"
     ws.column_dimensions["A"].width = 10
@@ -831,7 +860,8 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
         obs_ref = Reference(ws, min_col=obs_col, min_row=first_data_row, max_row=last_data_row)
         pred_ref = Reference(ws, min_col=pred_col, min_row=first_data_row, max_row=last_data_row)
         label = "Флот (все УН)" if field == GLOBAL_LABEL else field
-        chart = _line_chart(label, ws, cat_ref=cat_ref, obs_ref=obs_ref, pred_ref=pred_ref)
+        chart = _line_chart(label, ws, cat_ref=cat_ref, obs_ref=obs_ref, pred_ref=pred_ref,
+                            view_min=view_min, view_max=view_max)
         grid_row = chart_idx // 2
         grid_col = chart_idx % 2
         anchor = f"{get_column_letter(1 + grid_col * chart_cols)}{charts_top + grid_row * chart_rows}"
@@ -844,10 +874,9 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
     dws.append(["УН", "Месяц", "Активный добывающий парк", "Отказы (факт)",
                 "Отказы (прогноз)", "Global_Pooled отказы", "Global_Pooled доля",
                 "Интенсивность (факт)", "Интенсивность (прогноз)", "Основа парка"])
-    # Sheet mirrors the displayed window (2024+); the full-history model warm-up
-    # is retained only in the F_failure_rate_monthly.csv export.
-    audit = result.monthly[result.monthly["month"].isin(result.display_months)]
-    for _, row in audit[cols].iterrows():
+    # Full modelled history; factual columns are already blank before
+    # FACT_DISPLAY_FIRST_MONTH.
+    for _, row in result.monthly[cols].iterrows():
         dws.append([
             row["field"], row["month"],
             None if pd.isna(row["fleet_size"]) else int(row["fleet_size"]),
