@@ -51,12 +51,13 @@ from analysis.workflows.production_risk.survival import StrataModel, current_pum
 GLOBAL_LABEL = "ГЛОБАЛЬНО"
 RATE_SHEET = "Интенсивность отказов"
 DATA_SHEET = "Отказы_данные"
+# The model is computed from HISTORY_FIRST_MONTH so pumps are aged with real
+# warm-up (the 2024-01 model value is a proper mid-life rate, not zero), but the
+# sheet and charts only DISPLAY from DISPLAY_FIRST_MONTH.  Both the model and the
+# factual line therefore start at 2024-01; earlier months feed the model but are
+# not shown.
 HISTORY_FIRST_MONTH = "2018-01"
-# Charts span the full modelled history so the installation-driven model line is
-# visible throughout, not just from the plan window.  The factual line only starts
-# at FACT_DISPLAY_FIRST_MONTH — earlier actual coverage for the current master
-# fleet is incomplete, so plotting it would mislead.
-DISPLAY_FIRST_MONTH = HISTORY_FIRST_MONTH
+DISPLAY_FIRST_MONTH = "2024-01"
 FACT_DISPLAY_FIRST_MONTH = "2024-01"
 # Chart materiality only affects the visual grid.  The wide rate matrix and the
 # long audit sheet still include every УН so totals and auditability are intact.
@@ -675,14 +676,18 @@ def compute(
     fields_present = [f for f in monthly["field"].unique() if f != GLOBAL_LABEL]
     fields = [GLOBAL_LABEL] + sorted(fields_present)
     display_mask = monthly["month"].isin(display_months)
-    # Materiality: mean active fleet over the displayed span.  Fleet size is stable
-    # and interpretable, unlike a failure count that grows with the span length and
-    # would promote tiny long-lived fields on a full-history chart.
-    mean_fleet = (
-        monthly[display_mask & (monthly["field"] != GLOBAL_LABEL)]
-        .groupby("field")["fleet_size"]
-        .mean()
+    # Materiality: mean active fleet over the ACTUAL operating record (fact window),
+    # not the display span or forecast.  A field barely operating today but projected
+    # to grow (e.g. Большетирский, ~0 producing wells in history) must not be charted
+    # off the back of forecast growth; fleet size over real months keeps the charted
+    # set stable and matches the "suppress minor/new fields" intent.
+    fact_window_end = last_obs_month or (display_months[-1] if display_months else "")
+    material_mask = (
+        monthly["month"].isin(display_months)
+        & (monthly["month"] <= fact_window_end)
+        & (monthly["field"] != GLOBAL_LABEL)
     )
+    mean_fleet = monthly[material_mask].groupby("field")["fleet_size"].mean()
     chart_fields = [GLOBAL_LABEL] + [f for f in sorted(fields_present) if float(mean_fleet.get(f, 0.0)) >= CHART_MIN_MEAN_FLEET]
     monthly = monthly.sort_values(["field", "month"]).reset_index(drop=True)
 
@@ -839,7 +844,10 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
     dws.append(["УН", "Месяц", "Активный добывающий парк", "Отказы (факт)",
                 "Отказы (прогноз)", "Global_Pooled отказы", "Global_Pooled доля",
                 "Интенсивность (факт)", "Интенсивность (прогноз)", "Основа парка"])
-    for _, row in result.monthly[cols].iterrows():
+    # Sheet mirrors the displayed window (2024+); the full-history model warm-up
+    # is retained only in the F_failure_rate_monthly.csv export.
+    audit = result.monthly[result.monthly["month"].isin(result.display_months)]
+    for _, row in audit[cols].iterrows():
         dws.append([
             row["field"], row["month"],
             None if pd.isna(row["fleet_size"]) else int(row["fleet_size"]),
