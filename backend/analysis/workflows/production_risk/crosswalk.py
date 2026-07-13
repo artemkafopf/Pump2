@@ -223,6 +223,7 @@ def _read_plan_sheet(
             {
                 "raw_id": str(wid).strip(),
                 "plan_field": str(row[0]).strip() if row[0] is not None else "",
+                "license_area": str(row[1]).strip() if row[1] is not None else "",
                 "pad": str(row[12]).strip() if row[12] is not None else "",
             },
         )
@@ -326,7 +327,7 @@ def load_plan(
                         "liquid_volume_m3": liq,
                     }
                 )
-        meta.setdefault(wid, {"raw_id": wid, "plan_field": "", "pad": ""})
+        meta.setdefault(wid, {"raw_id": wid, "plan_field": "", "license_area": "", "pad": ""})
         meta[wid]["runtime_anomaly_count"] = count
 
     fwd_months = [m for m in months if forecast_start.strftime("%Y-%m") <= m <= horizon_end.strftime("%Y-%m")]

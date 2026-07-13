@@ -20,6 +20,21 @@ Private Function RequiredPath(ByVal ws As Worksheet, ByVal address As String, By
     RequiredPath = value
 End Function
 
+Private Function DateArg(ByVal value As Variant, ByVal label As String) As String
+    Dim textValue As String
+
+    textValue = Trim$(CStr(value))
+    If textValue Like "####-##-##" Then
+        DateArg = textValue
+        Exit Function
+    End If
+    If IsDate(value) Then
+        DateArg = Format$(CDate(value), "yyyy-mm-dd")
+        Exit Function
+    End If
+    Err.Raise vbObjectError + 2102, "Pump2", label & " date is invalid."
+End Function
+
 Public Sub RunProductionRisk()
     On Error GoTo Failed
 
@@ -43,12 +58,10 @@ Public Sub RunProductionRisk()
     command = command & " --gtm-schedule " & QuoteArg(RequiredPath(ws, "B2", "GTM schedule"))
     command = command & " --prediction-workbook " & QuoteArg(RequiredPath(ws, "B3", "Prediction workbook"))
     command = command & " --techregime-workbook " & QuoteArg(RequiredPath(ws, "B4", "Techregime workbook"))
+    command = command & " --equipment-big " & QuoteArg(RequiredPath(ws, "B9", "WellsArtificialLiftBig workbook"))
 
-    If Not IsDate(ws.Range("B6").Value) Or Not IsDate(ws.Range("B7").Value) Then
-        Err.Raise vbObjectError + 2102, "Pump2", "Forecast dates in B6:B7 are invalid."
-    End If
-    command = command & " --forecast-start " & Format$(CDate(ws.Range("B6").Value), "yyyy-mm-dd")
-    command = command & " --horizon-end " & Format$(CDate(ws.Range("B7").Value), "yyyy-mm-dd")
+    command = command & " --forecast-start " & DateArg(ws.Range("B6").Value, "Forecast start")
+    command = command & " --horizon-end " & DateArg(ws.Range("B7").Value, "Horizon end")
 
     downtimeValue = ws.Range("B5").Value2
     If Len(Trim$(CStr(downtimeValue))) > 0 Then

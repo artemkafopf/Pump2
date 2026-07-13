@@ -17,9 +17,9 @@ for _p in (str(REPO_ROOT), str(REPO_ROOT / "backend")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from analysis.paths import RESULTS_ROOT, results_dir
+from analysis.paths import RESULTS_ROOT, resolve_equipment_big_path, results_dir
 from analysis.workflows.production_risk import config as C
-from analysis.workflows.production_risk import crosswalk, export_excel, layers, repair_compat
+from analysis.workflows.production_risk import crosswalk, export_excel, failure_rate as failure_rate_mod, layers, repair_compat
 from analysis.workflows.production_risk.survival import HazardLayer, StrataModel
 
 
@@ -73,6 +73,7 @@ def _update_manifest(out_dir: Path, cfg: C.RunConfig, inputs: list[str]) -> None
         "gtm_schedule_path": str(cfg.gtm_schedule_path) if cfg.gtm_schedule_path else None,
         "prediction_workbook_path": str(cfg.prediction_workbook_path) if cfg.prediction_workbook_path else None,
         "techregime_workbook_path": str(cfg.techregime_workbook_path) if cfg.techregime_workbook_path else None,
+        "equipment_big_path": str(cfg.equipment_big_path) if cfg.equipment_big_path else None,
         "downtime_override_days": cfg.downtime_override_days,
         "esp_scope_policy": cfg.esp_scope_policy,
         "changeout_p90": cfg.changeout_p90,
@@ -132,6 +133,7 @@ def _print_summary(production: dict[str, object], workover: object, changeout: o
 def _write_full_tables(
     cfg, plan, esp_source, gtm, projection, production, workover, changeout, audit,
     repair_forecast, repair_forecast_stress, global_downtime, field_downtime,
+    failure_rate=None, failure_rate_stress=None,
 ) -> Path:
     """Detailed CSV/parquet/json analysis tree (opt-in via cfg.full_tables)."""
     import pandas as pd
@@ -158,11 +160,21 @@ def _write_full_tables(
         downtime_rows.append({"field": field, "n": stats.n, "p25": stats.p25, "p50": stats.p50,
                               "p75": stats.p75, "mean": stats.mean})
     _write_csv_unlocked(pd.DataFrame(downtime_rows), tables / "D_downtime_summary.csv", index=False, encoding="utf-8-sig")
+    if failure_rate is not None:
+        _write_csv_unlocked(failure_rate.monthly, tables / "F_failure_rate_monthly.csv", index=False, encoding="utf-8-sig")
+    if failure_rate_stress is not None:
+        _write_csv_unlocked(
+            failure_rate_stress.monthly,
+            tables / "F_failure_rate_hazard_monthly.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
     _update_manifest(out, cfg, [
         str(plan.master_path),
         str(esp_source.workbook_path),
         str(cfg.gtm_schedule_path or crosswalk.resolve_gtm_schedule_path()),
         str(cfg.techregime_workbook_path or crosswalk.resolve_techregime_workbook_path()),
+        str(cfg.equipment_big_path or resolve_equipment_big_path()),
         str(C.model_registry_path(cfg.bundle_date)),
         str(C.hazard_coeffs_path(cfg.bundle_date)),
         str(C.run_covariates_path(cfg.bundle_date)),
@@ -218,6 +230,18 @@ def run(cfg: C.RunConfig | None = None, write_excel: bool | None = None) -> dict
     changeout = layers.changeout(production["by_well"])
     repair_forecast = repair_compat.build(projection, states, cfg, scenario_id=C.PRIMARY_SCENARIO_ID)
     repair_forecast_stress = repair_compat.build(projection, states, cfg, scenario_id=C.STRESS_SCENARIO_ID)
+    failure_rate = failure_rate_mod.compute(
+        plan, esp_source, projection, cfg, scenario_id=C.PRIMARY_SCENARIO_ID, model=model
+    )
+    failure_rate_stress = failure_rate_mod.compute(
+        plan, esp_source, projection, cfg, scenario_id=C.STRESS_SCENARIO_ID, model=model
+    )
+    print(
+        f"      failure-rate: fields={len(failure_rate.fields)}  "
+        f"Свод∩master={int(failure_rate.coverage['svod_in_master'])}  "
+        f"last fact month={failure_rate.coverage['last_observed_month']}  "
+        f"hazard fields={len(failure_rate_stress.fields)}"
+    )
 
     _print_summary(production, workover, changeout, audit)
 
@@ -228,8 +252,12 @@ def run(cfg: C.RunConfig | None = None, write_excel: bool | None = None) -> dict
             export_excel.write(
                 deliverables / "Риск_добычи_УЭЦН_2026_2027.xlsx", production, workover, changeout, audit
             ),
-            repair_compat.write_excel(deliverables / "Прогноз_ремонтов.xlsx", repair_forecast),
-            repair_compat.write_excel(deliverables / "Прогноз_ремонтов_hazard.xlsx", repair_forecast_stress),
+            repair_compat.write_excel(deliverables / "Прогноз_ремонтов.xlsx", repair_forecast, failure_rate=failure_rate),
+            repair_compat.write_excel(
+                deliverables / "Прогноз_ремонтов_hazard.xlsx",
+                repair_forecast_stress,
+                failure_rate=failure_rate_stress,
+            ),
         ]
         for path in written:
             print(f"      wrote {path}")
@@ -242,6 +270,8 @@ def run(cfg: C.RunConfig | None = None, write_excel: bool | None = None) -> dict
         tables_dir = _write_full_tables(
             cfg, plan, esp_source, gtm, projection, production, workover, changeout, audit,
             repair_forecast, repair_forecast_stress, global_downtime, field_downtime,
+            failure_rate=failure_rate,
+            failure_rate_stress=failure_rate_stress,
         )
         print(f"      tables → {tables_dir}")
 
@@ -260,6 +290,8 @@ def run(cfg: C.RunConfig | None = None, write_excel: bool | None = None) -> dict
         "audit": audit,
         "repair_forecast": repair_forecast,
         "repair_forecast_stress": repair_forecast_stress,
+        "failure_rate": failure_rate,
+        "failure_rate_stress": failure_rate_stress,
     }
 
 

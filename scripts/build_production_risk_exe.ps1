@@ -32,6 +32,9 @@ $pyInstallerArgs = @(
     "--name", $Name,
     "--paths", "backend",
     "--add-data", "results\esp_survival_vba_models;results\esp_survival_vba_models",
+    "--hidden-import", "analysis.data.equipment_big",
+    "--hidden-import", "analysis.data.pump_type_parser",
+    "--hidden-import", "scripts.data_utils",
     "--hidden-import", "openpyxl.cell._writer",
     # heavy packages the workflow never imports (analysis/__init__ is lazy):
     "--exclude-module", "torch",

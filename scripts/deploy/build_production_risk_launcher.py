@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
 
 
@@ -14,6 +13,7 @@ for item in (str(REPO_ROOT), str(BACKEND_ROOT)):
         sys.path.insert(0, item)
 
 from analysis.paths import (  # noqa: E402
+    resolve_equipment_big_path,
     resolve_gtm_schedule_path,
     resolve_pp_master_path,
     resolve_prediction_workbook_path,
@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gtm-schedule", type=Path, default=None)
     parser.add_argument("--prediction-workbook", type=Path, default=None)
     parser.add_argument("--techregime-workbook", type=Path, default=None)
+    parser.add_argument("--equipment-big", type=Path, default=None)
     parser.add_argument("--module", type=Path, default=DEFAULT_MODULE)
     parser.add_argument("--enable-vbom", action="store_true")
     return parser.parse_args()
@@ -46,6 +47,8 @@ def parse_args() -> argparse.Namespace:
 
 def set_value(ws, address: str, value, *, bold: bool = False) -> None:
     cell = ws.Range(address)
+    if address in {"B6", "B7"}:
+        cell.NumberFormat = "@"
     cell.Value = value
     cell.Font.Bold = bold
 
@@ -65,6 +68,7 @@ def build_sheet(ws, values: dict[str, object]) -> None:
         "A6": "Начало прогноза",
         "A7": "Последний месяц",
         "A8": "Исполняемый файл",
+        "A9": "Файл 5: WellsArtificialLiftBig",
         "A10": "Статус",
         "A11": "Время обновления",
         "A12": "Последняя команда",
@@ -76,12 +80,12 @@ def build_sheet(ws, values: dict[str, object]) -> None:
         set_value(ws, address, value)
 
     ws.Range("B5").ClearContents()
-    ws.Range("B6:B7").NumberFormat = "dd.mm.yyyy"
+    ws.Range("B6:B7").NumberFormat = "@"
     ws.Range("B11").NumberFormat = "dd.mm.yyyy hh:mm:ss"
     ws.Range("B10").Value = "Ready"
     ws.Range("B12:B13").WrapText = True
     ws.Range("A1:A13").Interior.Color = 0xE2F0D9
-    ws.Range("B1:B8").Interior.Color = 0xFFF2CC
+    ws.Range("B1:B9").Interior.Color = 0xFFF2CC
     ws.Range("A1:A13").Borders.LineStyle = 1
     ws.Range("B1:B13").Borders.LineStyle = 1
     ws.Columns("A").ColumnWidth = 29
@@ -120,9 +124,10 @@ def main() -> int:
         "B2": str((args.gtm_schedule or resolve_gtm_schedule_path()).resolve()),
         "B3": str((args.prediction_workbook or resolve_prediction_workbook_path()).resolve()),
         "B4": str((args.techregime_workbook or resolve_techregime_workbook_path()).resolve()),
-        "B6": datetime(2026, 7, 1),
-        "B7": datetime(2027, 12, 1),
+        "B6": "2026-07-01",
+        "B7": "2027-12-01",
         "B8": str(exe_path),
+        "B9": str((args.equipment_big or resolve_equipment_big_path()).resolve()),
     }
 
     pythoncom.CoInitialize()

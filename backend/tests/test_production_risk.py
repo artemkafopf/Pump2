@@ -67,13 +67,13 @@ def _make_plan_workbook(path: Path) -> None:
             ws.cell(row=3, column=idx, value=value)
 
     summary_rows = [
-        ["Ярактинское НГКМ", "", "", "", "", "", "", "", "Добыча нефти", "т", "", "Ya_001", "1", 310.0],
-        ["Ярактинское НГКМ", "", "", "", "", "", "", "", "Добыча жидкости", "м3", "", "Ya_001", "1", 620.0],
-        ["Ярактинское НГКМ", "", "", "", "", "", "", "", "Отработанное время", "дн", "", "Ya_001", "1", 40.0],
+        ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча нефти", "т", "", "Ya_001", "1", 310.0],
+        ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча жидкости", "м3", "", "Ya_001", "1", 620.0],
+        ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Отработанное время", "дн", "", "Ya_001", "1", 40.0],
     ]
     registry_rows = [
-        ["Ярактинское НГКМ", "", "", "", "", "", "", "", "Добыча нефти", "т/сут", "", "Ya_001", "1", 10.0],
-        ["Ярактинское НГКМ", "", "", "", "", "", "", "", "Добыча жидкости", "м3/сут", "", "Ya_001", "1", 20.0],
+        ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча нефти", "т/сут", "", "Ya_001", "1", 10.0],
+        ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча жидкости", "м3/сут", "", "Ya_001", "1", 20.0],
     ]
     for row_idx, row in enumerate(summary_rows, start=4):
         for col_idx, value in enumerate(row, start=1):
@@ -224,6 +224,7 @@ def test_load_plan_uses_summary_sheet_and_clips_runtime(tmp_path: Path):
     assert plan.oil_volume.at["YA_001", "2026-01"] == 310.0
     assert plan.registry_oil_rate.at["YA_001", "2026-01"] == 10.0
     assert plan.op_days.at["YA_001", "2026-01"] == 31.0
+    assert plan.producer_meta.at["YA_001", "license_area"] == "УН-Яракта"
     assert not plan.anomalies.empty
     assert "runtime_gt_calendar" in set(plan.anomalies["reason"])
 
@@ -314,8 +315,15 @@ def test_repair_compat_preserves_legacy_status_shape(tmp_path: Path):
     assert payload["rows"][0]["used_prediction_source"] == "survival"
     assert payload["rows"][0]["catboost_nno"] is None
     assert len(payload["rows"][0]["statuses"]) == len(payload["dates"])
-    assert payload["rows"][0]["statuses"].count(0) == 3
-    assert payload["rows"][0]["downtime_days"] == 3
+    # Failures-only view: one status==0 per allocated failure event (E=1.2 -> 1 event),
+    # NOT a painted downtime block.
+    row0 = payload["rows"][0]
+    assert row0["statuses"].count(0) == len(row0["event_dates"]) == 1
+    # each 0 sits exactly on a failure event date
+    for iso in row0["event_dates"]:
+        idx = payload["dates"].index(iso)
+        assert row0["statuses"][idx] == 0
+    assert row0["downtime_days"] == 3
 
     path = repair_compat.write_excel(tmp_path / "compat.xlsx", payload)
     assert path.exists()
@@ -375,7 +383,9 @@ def test_event_allocation_preserves_fleet_totals_and_month_profile():
         assert got <= 3.0 * expected_monthly, (month, got)
 
 
-def test_off_today_wells_get_downtime_block_not_single_day():
+def test_off_today_wells_are_not_painted_down_in_failures_only_view():
+    """Failures-only view: an off-today well with no predicted failures shows all 1s;
+    the old repair-in-progress downtime block is intentionally gone."""
     import pandas as pd
 
     model = StrataModel()
@@ -440,9 +450,8 @@ def test_off_today_wells_get_downtime_block_not_single_day():
     cfg = C.RunConfig(forecast_start=date(2026, 7, 1), horizon_end=date(2026, 8, 1), write_excel=False)
     payload = repair_compat.build(df, [state], cfg)
     statuses = payload["rows"][0]["statuses"]
-    # down for the full scenario downtime block from forecast start, then back up
-    assert statuses[:16] == [0] * 16
-    assert statuses[16] == 1
+    assert set(statuses) == {1}
+    assert payload["rows"][0]["event_dates"] == []
 
 
 def test_techregime_age_used_for_stale_and_new_wells():
@@ -467,6 +476,115 @@ def test_techregime_age_used_for_stale_and_new_wells():
         well_code="YA_002", status="В работе", in_operation=True, lift="ЭЦН", age_op=None, report_date=None
     )
     assert _techregime_age(tr_no_age, _PlanStub(), "YA_002", date(2026, 7, 1)) is None
+
+
+def _fr_fixtures():
+    """Minimal PlanData/EspSource/projection for failure-rate tests."""
+    import pandas as pd
+    from analysis.workflows.production_risk import crosswalk
+
+    months = ["2026-05", "2026-06", "2026-07"]
+    wids = ["YA_001", "YA_002", "YA_003"]
+    op_raw = pd.DataFrame(30.0, index=pd.Index(wids, name="wid"), columns=months)
+    oil = pd.DataFrame(
+        [[100.0, 100.0, 100.0], [90.0, 90.0, 90.0], [0.0, 0.0, 0.0]],
+        index=pd.Index(wids, name="wid"),
+        columns=months,
+    )
+    liq = pd.DataFrame(
+        [[200.0, 200.0, 200.0], [180.0, 180.0, 180.0], [0.0, 0.0, 0.0]],
+        index=pd.Index(wids, name="wid"),
+        columns=months,
+    )
+    meta = pd.DataFrame(
+        {
+            "plan_field": ["Ярактинское НГКМ", "Ярактинское НГКМ", "Ярактинское НГКМ"],
+            "license_area": ["УН-Яракта", "УН-Яракта", "УН-Яракта"],
+        },
+        index=pd.Index(wids, name="wid"),
+    )
+
+    class _Plan:
+        pass
+
+    plan = _Plan()
+    plan.months = months
+    plan.op_days_raw = op_raw
+    plan.oil_volume = oil
+    plan.liquid_volume = liq
+    plan.producer_meta = meta
+
+    def _run(code, mount, stop, ff, age):
+        return crosswalk.EspRun(
+            well_code=code, field_raw="Ya", ctr_raw="Борец", sour_raw="Некислый",
+            run_seq=1, mount=mount, stop=stop, demo=None, age_op=age,
+            failure_flag=ff, glf=None, load_mean=None, curvature=None,
+        )
+
+    class _Src:
+        pass
+
+    src = _Src()
+    src.source_cutoff = datetime(2026, 6, 4)
+    src.runs_by_well = {
+        "YA_001": [_run("YA_001", datetime(2024, 6, 1), datetime(2026, 5, 20), 1, 500.0)],
+        "YA_002": [_run("YA_002", datetime(2025, 1, 1), None, 0, 400.0)],
+    }
+
+    projection = pd.DataFrame(
+        [
+            {"scenario": C.PRIMARY_SCENARIO_ID, "wid": w, "plan_field": "Ярактинское НГКМ",
+             "month": "2026-07", "expected_failures": ef}
+            for w, ef in [("YA_001", 0.10), ("YA_002", 0.05)]
+        ]
+    )
+    return plan, src, projection
+
+
+def test_failure_rate_fleet_observed_and_forecast():
+    from analysis.workflows.production_risk import failure_rate as fr
+
+    plan, src, projection = _fr_fixtures()
+    cfg = C.RunConfig(forecast_start=date(2026, 7, 1), horizon_end=date(2026, 7, 1), write_excel=False)
+    res = fr.compute(plan, src, projection, cfg)
+
+    g = res.monthly[res.monthly["field"] == fr.GLOBAL_LABEL].set_index("month")
+    # fleet size = active producing wells: non-zero op time and oil/liquid > 0.
+    # YA_003 has runtime but zero production, so it must not inflate the denominator.
+    assert g.at["2026-05", "fleet_size"] == 2
+    # one actual failure (Failure Flag=1, stop in 2026-05)
+    assert g.at["2026-05", "observed_failures"] == 1.0
+    assert abs(g.at["2026-05", "observed_rate"] - 0.5) < 1e-9
+    # forecast month uses the sanctioned projection expected_failures; observed is blanked
+    assert abs(g.at["2026-07", "predicted_failures"] - 0.15) < 1e-9
+    assert math.isnan(g.at["2026-07", "observed_rate"])
+    # history months carry a Weibull prediction driven by observed install intervals
+    assert g.loc[["2026-05", "2026-06"], "predicted_failures"].sum() >= 0.0
+    # The still-running YA_002 interval contributes before forecast start; stopped
+    # YA_001 is not synthetically renewed unless an observed Big/Svod interval exists.
+    assert g.at["2026-06", "predicted_failures"] > 0.0
+    assert fr.GLOBAL_LABEL in res.fields
+    assert "УН-Яракта" in set(res.monthly["field"])
+
+
+def test_failure_rate_sheets_written(tmp_path: Path):
+    from openpyxl import Workbook
+    from analysis.workflows.production_risk import failure_rate as fr
+
+    plan, src, projection = _fr_fixtures()
+    cfg = C.RunConfig(forecast_start=date(2026, 7, 1), horizon_end=date(2026, 7, 1), write_excel=False)
+    res = fr.compute(plan, src, projection, cfg)
+
+    wb = Workbook()
+    fr.write_sheets(wb, res)
+    assert fr.RATE_SHEET in wb.sheetnames
+    assert fr.DATA_SHEET in wb.sheetnames
+    path = tmp_path / "fr.xlsx"
+    wb.save(path)
+    assert path.exists()
+    # charts embedded (global + per field)
+    ws = wb[fr.RATE_SHEET]
+    assert len(ws._charts) == len(res.fields)
 
 
 def test_lazy_analysis_import_keeps_scipy_out():

@@ -108,6 +108,7 @@ class RunConfig:
     gtm_schedule_path: Path | None = None
     prediction_workbook_path: Path | None = None
     techregime_workbook_path: Path | None = None
+    equipment_big_path: Path | None = None
     downtime_override_days: int | None = None
     esp_scope_policy: str = ESP_SCOPE_CONSERVATIVE
     changeout_p90: float = CHANGEOUT_P90_THRESHOLD

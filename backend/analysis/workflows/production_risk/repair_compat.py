@@ -193,23 +193,13 @@ def build(
             if dates[0] <= item <= dates[-1]
         ]
         downtime_days = _downtime_days(grp)
+        # Failures-only view: 0 marks the day of a predicted failure, 1 every other day.
+        # The pump on/off (downtime / repair-in-progress) period is intentionally NOT
+        # painted — the sheet shows failure events, not availability.
         statuses = [1] * len(dates)
-        if state is not None and state.current_in_operation is False and dates:
-            # Stopped in the current techregime report: treat as a repair in progress —
-            # down for a full scenario downtime block from forecast start, extended to
-            # the first scheduled ГТМ/КРС date when one exists in the horizon.
-            resume = dates[0] + timedelta(days=downtime_days)
-            if state.first_gtm_date is not None:
-                gtm_day = pd.Timestamp(state.first_gtm_date).date()
-                if gtm_day > dates[0]:
-                    resume = max(resume, min(gtm_day, dates[-1] + timedelta(days=1)))
-            for idx in range((min(resume, dates[-1] + timedelta(days=1)) - dates[0]).days):
-                statuses[idx] = 0
         for item in event_dates:
-            for offset in range(downtime_days):
-                down_date = item + timedelta(days=offset)
-                if down_date in date_index:
-                    statuses[date_index[down_date]] = 0
+            if item in date_index:
+                statuses[date_index[item]] = 0
 
         predicted_nno = _predicted_interval(grp)
         for event_date in event_dates:
@@ -276,8 +266,7 @@ def build(
             "Values are survival-derived; CatBoost-specific fields are intentionally empty.",
             "Event counts use fleet-preserving largest-remainder rounding: total events == round(sum of expected failures).",
             "Each well's events are placed by deterministic inverse-CDF sampling of its own monthly hazard profile, with a stable per-well phase to avoid artificial date piles.",
-            "Each event paints a downtime block using scenario downtime_days.",
-            "Wells stopped in the current techregime report start with a downtime block (extended to the first scheduled GTM date when present).",
+            "Failures-only view: status 0 marks the day of a predicted failure, 1 every other day. The pump on/off (downtime/repair) period is NOT painted.",
         ],
     }
 
@@ -302,7 +291,7 @@ def write_json(path: Path, payload: dict) -> Path:
         return stamped
 
 
-def write_excel(path: Path, payload: dict) -> Path:
+def write_excel(path: Path, payload: dict, failure_rate=None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
     sheet = workbook.active
@@ -339,6 +328,11 @@ def write_excel(path: Path, payload: dict) -> Path:
     summary.append(["Missing feature columns", ", ".join(payload.get("missing_feature_columns") or [])])
     for note in payload.get("notes") or []:
         summary.append(["Note", note])
+
+    if failure_rate is not None:
+        from analysis.workflows.production_risk import failure_rate as _fr
+        _fr.write_sheets(workbook, failure_rate)
+
     try:
         workbook.save(path)
         return path
