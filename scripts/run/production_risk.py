@@ -32,6 +32,7 @@ def main() -> None:
     ap.add_argument("--prediction-workbook", type=Path, default=None, help="override workbook with sheet Свод")
     ap.add_argument("--techregime-workbook", type=Path, default=None, help="override current techregime workbook")
     ap.add_argument("--equipment-big", type=Path, default=None, help="override WellsArtificialLiftBig workbook")
+    ap.add_argument("--fact-through", default=None, help="last complete fact month for observed failure rates (YYYY-MM)")
     def _positive_days(value: str) -> int:
         days = int(value)
         if days < 1:
@@ -53,6 +54,7 @@ def main() -> None:
         prediction_workbook_path=args.prediction_workbook,
         techregime_workbook_path=args.techregime_workbook,
         equipment_big_path=args.equipment_big,
+        fact_through_month=args.fact_through or C.DEFAULT_FACT_THROUGH_MONTH,
         downtime_override_days=args.downtime_days,
         esp_scope_policy=args.scope_policy,
         changeout_p90=args.p90,

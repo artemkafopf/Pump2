@@ -26,7 +26,7 @@ for _p in (str(REPO_ROOT), str(REPO_ROOT / "backend")):
 
 SLUG = "production_risk_forecast"
 
-BUNDLE_DATE = "2026-07-08"
+BUNDLE_DATE = "2026-07-13"
 BUNDLE_ROOT = RESOURCE_ROOT / "results" / "esp_survival_vba_models"
 
 PLAN_FIRST_MONTH = date(2024, 1, 1)
@@ -50,20 +50,36 @@ HAZARD_SHIP_REASON = "physical_sensitivity_not_oos_validated"
 
 FIELD_PREFIX_MAP = {
     "YA": "Ya",
+    "YAY": "Ya",
     "VT": "Vt",
     "VTI": "Vt",
     "VTB": "Vt",
     "VTBB": "Vt",
     "IC": "Ic",
     "MC": "Mc",
+    "MR": "Mc",
+    "NE": "Mc",
     "AZ": "Az",
     "AZA": "Az",
+    "AM": "Za",
     "AU": "Za",
     "AUY": "Za",
     "AUZ": "Za",
+    "ZYI": "Za",
     "DA": "Da",
     "DAD": "Da",
 }
+
+# Prefixes intentionally routed to the registry's Global_Pooled fallback.  They
+# are kept out of FIELD_PREFIX_MAP so code can distinguish an explicit decision
+# from an accidental unmapped prefix and report fallback share diagnostics.
+EXPLICIT_GLOBAL_FALLBACK = {
+    "BT",   # Большетирский: material Big history, but no defensible existing field stratum.
+    "KI",   # Кийский: no existing Ki stratum in the shipped Weibull registry.
+    "MSH",  # Мышевского / Кийский area: no existing Msh/Ki stratum.
+}
+
+DEFAULT_FACT_THROUGH_MONTH = "2026-04"
 
 
 def bundle_dir(bundle_date: str = BUNDLE_DATE) -> Path:
@@ -109,6 +125,7 @@ class RunConfig:
     prediction_workbook_path: Path | None = None
     techregime_workbook_path: Path | None = None
     equipment_big_path: Path | None = None
+    fact_through_month: str = DEFAULT_FACT_THROUGH_MONTH
     downtime_override_days: int | None = None
     esp_scope_policy: str = ESP_SCOPE_CONSERVATIVE
     changeout_p90: float = CHANGEOUT_P90_THRESHOLD

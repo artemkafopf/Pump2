@@ -74,6 +74,7 @@ class StrataModel:
                     "beta2": float(row["beta2"]),
                     "eta2": float(row["eta2"]),
                     "b50": float(row["b50"]) if pd.notna(row.get("b50")) else float("nan"),
+                    "uptime_factor": float(row.get("uptime_factor", 1.0)) if pd.notna(row.get("uptime_factor", 1.0)) else 1.0,
                 }, key
         raise KeyError("Global_Pooled missing from esp_models.csv")
 

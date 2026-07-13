@@ -81,7 +81,8 @@ def _build_age_pools(
         if st is None or not st.is_active or st.age_op is None:
             continue
         age = max(0.0, float(st.age_op) + _advance_days(plan, wid, esp_source.source_cutoff, forecast_start))
-        _, stratum = model.resolve(st.field, st.sour, st.ctr)
+        model_field = map_model_field_from_well(wid)
+        _, stratum = model.resolve(model_field, st.sour, st.ctr)
         by_stratum[stratum].append(age)
         field_key = None if stratum == "Global_Pooled" else stratum.split("_", 1)[0]
         if field_key:
@@ -174,7 +175,8 @@ def build_well_states(
         tr_is_esp = bool(tr_status is not None and tr_status.lift and "ЭЦН" in str(tr_status.lift).upper())
 
         if st is not None:
-            params, stratum = model.resolve(st.field, st.sour, st.ctr)
+            model_field = map_model_field_from_well(wid)
+            params, stratum = model.resolve(model_field, st.sour, st.ctr)
             model_field = None if stratum == "Global_Pooled" else stratum.split("_", 1)[0]
             if st.is_active and st.age_op is not None:
                 age = int(round(max(0.0, float(st.age_op) + _advance_days(plan, wid, esp_source.source_cutoff, cfg.forecast_start))))

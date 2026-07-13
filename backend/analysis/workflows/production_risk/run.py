@@ -242,6 +242,18 @@ def run(cfg: C.RunConfig | None = None, write_excel: bool | None = None) -> dict
         f"last fact month={failure_rate.coverage['last_observed_month']}  "
         f"hazard fields={len(failure_rate_stress.fields)}"
     )
+    fallback_share = failure_rate.coverage.get("global_pooled_share_by_field", {})
+    if isinstance(fallback_share, dict):
+        top_fallback = sorted(
+            ((k, float(v)) for k, v in fallback_share.items() if k != failure_rate_mod.GLOBAL_LABEL),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )[:5]
+        if top_fallback:
+            details = ", ".join(f"{field}={share:.0%}" for field, share in top_fallback if share > 0)
+            if details:
+                print(f"      Global_Pooled share (top УН): {details}")
+    print(f"      charts rendered: {len(failure_rate.chart_fields)} of {len(failure_rate.fields)} fields")
 
     _print_summary(production, workover, changeout, audit)
 

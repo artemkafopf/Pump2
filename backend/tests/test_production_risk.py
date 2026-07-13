@@ -310,7 +310,12 @@ def test_repair_compat_preserves_legacy_status_shape(tmp_path: Path):
             }
         ]
     )
-    cfg = C.RunConfig(forecast_start=date(2026, 7, 1), horizon_end=date(2026, 7, 1), write_excel=False)
+    cfg = C.RunConfig(
+        forecast_start=date(2026, 7, 1),
+        horizon_end=date(2026, 7, 1),
+        fact_through_month="2026-06",
+        write_excel=False,
+    )
     payload = repair_compat.build(df, [state], cfg)
     assert payload["rows"][0]["used_prediction_source"] == "survival"
     assert payload["rows"][0]["catboost_nno"] is None
@@ -478,6 +483,34 @@ def test_techregime_age_used_for_stale_and_new_wells():
     assert _techregime_age(tr_no_age, _PlanStub(), "YA_002", date(2026, 7, 1)) is None
 
 
+def test_model_prefix_mapping_and_explicit_global_fallback():
+    from analysis.workflows.production_risk import crosswalk
+
+    assert crosswalk.map_model_field_from_well("MR_1001") == "Mc"
+    assert crosswalk.map_model_field_from_well("NE_1001") == "Mc"
+    assert crosswalk.map_model_field_from_well("AM_1001") == "Za"
+    assert crosswalk.map_model_field_from_well("YAY_1") == "Ya"
+    assert crosswalk.map_model_field_from_well("ZYI_1") == "Za"
+    assert crosswalk.map_model_field_from_well("KI_1") is None
+    assert crosswalk.is_explicit_global_fallback("KI_1")
+    assert crosswalk.is_explicit_global_fallback("BT_1")
+
+
+def test_strata_model_exposes_uptime_factor(tmp_path: Path):
+    from analysis.workflows.production_risk.survival import StrataModel
+
+    registry = tmp_path / "esp_models.csv"
+    registry.write_text(
+        "stratum,field,h2s_class,contractor_group,model_kind,w1,beta1,eta1,beta2,eta2,b20,b50,b80,b50_lo,b50_hi,uptime_factor,n_runs,n_failures,pct_mixed_clock,clock,fit_date\n"
+        "Mc_nonsour_Pooled,Mc,nonsour,Pooled,k2,0.1,0.8,30,1.4,360,50,220,500,190,280,0.74,10,8,0,ttf_mix,2026-07-13\n"
+        "Global_Pooled,,,,k1,0,1,100,1,100,20,70,150,,,1,10,5,0,ttf_mix,2026-07-13\n",
+        encoding="utf-8-sig",
+    )
+    params, stratum = StrataModel(registry_path=registry).resolve("Mc", "nonsour", "Pooled")
+    assert stratum == "Mc_nonsour_Pooled"
+    assert params["uptime_factor"] == 0.74
+
+
 def _fr_fixtures():
     """Minimal PlanData/EspSource/projection for failure-rate tests."""
     import pandas as pd
@@ -545,7 +578,12 @@ def test_failure_rate_fleet_observed_and_forecast():
     from analysis.workflows.production_risk import failure_rate as fr
 
     plan, src, projection = _fr_fixtures()
-    cfg = C.RunConfig(forecast_start=date(2026, 7, 1), horizon_end=date(2026, 7, 1), write_excel=False)
+    cfg = C.RunConfig(
+        forecast_start=date(2026, 7, 1),
+        horizon_end=date(2026, 7, 1),
+        fact_through_month="2026-06",
+        write_excel=False,
+    )
     res = fr.compute(plan, src, projection, cfg)
 
     g = res.monthly[res.monthly["field"] == fr.GLOBAL_LABEL].set_index("month")
@@ -565,6 +603,8 @@ def test_failure_rate_fleet_observed_and_forecast():
     assert g.at["2026-06", "predicted_failures"] > 0.0
     assert fr.GLOBAL_LABEL in res.fields
     assert "УН-Яракта" in set(res.monthly["field"])
+    assert "global_pooled_share_by_field" in res.coverage
+    assert res.coverage["fleet_denominator"] == "interval_before_plan_then_plan_active_producing"
 
 
 def test_failure_rate_sheets_written(tmp_path: Path):
@@ -572,7 +612,12 @@ def test_failure_rate_sheets_written(tmp_path: Path):
     from analysis.workflows.production_risk import failure_rate as fr
 
     plan, src, projection = _fr_fixtures()
-    cfg = C.RunConfig(forecast_start=date(2026, 7, 1), horizon_end=date(2026, 7, 1), write_excel=False)
+    cfg = C.RunConfig(
+        forecast_start=date(2026, 7, 1),
+        horizon_end=date(2026, 7, 1),
+        fact_through_month="2026-06",
+        write_excel=False,
+    )
     res = fr.compute(plan, src, projection, cfg)
 
     wb = Workbook()
@@ -582,9 +627,10 @@ def test_failure_rate_sheets_written(tmp_path: Path):
     path = tmp_path / "fr.xlsx"
     wb.save(path)
     assert path.exists()
-    # charts embedded (global + per field)
+    # charts embedded only for material fields; the audit sheet still includes all fields.
     ws = wb[fr.RATE_SHEET]
-    assert len(ws._charts) == len(res.fields)
+    assert len(ws._charts) == len(res.chart_fields)
+    assert fr.GLOBAL_LABEL in res.chart_fields
 
 
 def test_lazy_analysis_import_keeps_scipy_out():

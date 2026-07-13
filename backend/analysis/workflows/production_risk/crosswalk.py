@@ -57,7 +57,17 @@ def sour_group(v) -> str:
 
 def map_model_field_from_well(code: str) -> str | None:
     prefix = code.split("_", 1)[0].upper() if "_" in code else code.upper()
+    if prefix in C.EXPLICIT_GLOBAL_FALLBACK:
+        return None
     return C.FIELD_PREFIX_MAP.get(prefix)
+
+
+def model_prefix_from_well(code: str) -> str:
+    return code.split("_", 1)[0].upper() if "_" in code else code.upper()
+
+
+def is_explicit_global_fallback(code: str) -> bool:
+    return model_prefix_from_well(code) in C.EXPLICIT_GLOBAL_FALLBACK
 
 
 def _as_float(x) -> float | None:
