@@ -29,6 +29,10 @@ from scripts.deploy.inject_vba import (  # noqa: E402
 
 DEFAULT_OUTPUT = REPO_ROOT / "dist" / "Pump2ProductionRisk" / "ProductionRiskLauncher.xlsm"
 DEFAULT_MODULE = REPO_ROOT / "vba" / "mdlProductionRiskLauncher.bas"
+MODEL_CALIBRATION_NOTE = (
+    "ВНИМАНИЕ: прогноз отказов содержит явно отмеченные ручные поправки "
+    "(Mc survival-weight, Ya/Vt и УН-калибровка; глобально = сумма УН)."
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,8 +60,8 @@ def set_value(ws, address: str, value, *, bold: bool = False) -> None:
 def build_sheet(ws, values: dict[str, object]) -> None:
     ws.Name = "Запуск"
     ws.Cells.Clear()
-    ws.Range("A1:B20").Font.Name = "Calibri"
-    ws.Range("A1:B20").Font.Size = 11
+    ws.Range("A1:B22").Font.Name = "Calibri"
+    ws.Range("A1:B22").Font.Size = 11
 
     labels = {
         "A1": "Файл 1: план добычи",
@@ -73,6 +77,7 @@ def build_sheet(ws, values: dict[str, object]) -> None:
         "A11": "Время обновления",
         "A12": "Последняя команда",
         "A13": "Папка результатов",
+        "A14": "Поправки модели",
     }
     for address, label in labels.items():
         set_value(ws, address, label, bold=True)
@@ -83,17 +88,19 @@ def build_sheet(ws, values: dict[str, object]) -> None:
     ws.Range("B6:B7").NumberFormat = "@"
     ws.Range("B11").NumberFormat = "dd.mm.yyyy hh:mm:ss"
     ws.Range("B10").Value = "Ready"
-    ws.Range("B12:B13").WrapText = True
-    ws.Range("A1:A13").Interior.Color = 0xE2F0D9
+    ws.Range("B14").Value = MODEL_CALIBRATION_NOTE
+    ws.Range("B12:B14").WrapText = True
+    ws.Range("A1:A14").Interior.Color = 0xE2F0D9
     ws.Range("B1:B9").Interior.Color = 0xFFF2CC
-    ws.Range("A1:A13").Borders.LineStyle = 1
-    ws.Range("B1:B13").Borders.LineStyle = 1
+    ws.Range("B14").Interior.Color = 0xFCE4D6
+    ws.Range("A1:A14").Borders.LineStyle = 1
+    ws.Range("B1:B14").Borders.LineStyle = 1
     ws.Columns("A").ColumnWidth = 29
     ws.Columns("B").ColumnWidth = 95
-    ws.Rows("1:13").RowHeight = 23
-    ws.Rows("12:13").RowHeight = 46
+    ws.Rows("1:14").RowHeight = 23
+    ws.Rows("12:14").RowHeight = 46
 
-    button = ws.Shapes.AddShape(1, ws.Range("A15").Left, ws.Range("A15").Top, ws.Range("A15:B16").Width, 42)
+    button = ws.Shapes.AddShape(1, ws.Range("A17").Left, ws.Range("A17").Top, ws.Range("A17:B18").Width, 42)
     button.Name = "btnRunProductionRisk"
     button.TextFrame.Characters().Text = "Run forecast"
     button.OnAction = "RunProductionRisk"

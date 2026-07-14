@@ -91,6 +91,30 @@ _CALIBRATION_FACTORS: dict[str, float] = {
     "Vt": 0.837,   # Верхнетирский — MODIFIED (fact/model over 2024-01..2026-04)
 }
 
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ MODIFIED PARAMETERS — REPORTING-FIELD EMPIRICAL CALIBRATION (not a fit)      │
+# └─────────────────────────────────────────────────────────────────────────────┘
+# Same manual tune extended to every УН with non-zero model mass in the completed
+# fact window 2024-01..2026-04, after the stratum-level adjustments above.  These
+# factors are determined once from fact/model and HELD CONSTANT.  They are applied
+# before the ГЛОБАЛЬНО row is aggregated, so the global model line is calibrated by
+# the sum of calibrated fields (no separate post-aggregation multiplier that would
+# break additivity).  Fields with zero model mass have no defensible factor.
+_REPORTING_FIELD_CALIBRATION_FACTORS: dict[str, float] = {
+    "Верхнетирский УН": 1.000126898615,        # MODIFIED: 251 / 250.968152 (after Vt tune)
+    "Ярактинский УН": 0.999254776044,          # MODIFIED: 235 / 235.175258 (after Ya tune)
+    "Аянский участок": 0.893462550865,         # MODIFIED: 110 / 123.116520
+    "Аянский (Западный) УН": 0.552146471743,  # MODIFIED: 65 / 117.722386
+    "Западно-Ярактинский УН": 0.596906670562, # MODIFIED: 33 / 55.285025
+    "Мирнинский УН": 0.929134934813,           # MODIFIED: 46 / 49.508417 (after Mc survival-weight)
+    "Даниловский УН": 0.783226592147,          # MODIFIED: 8 / 10.214158
+    "Марковский УН": 0.334734735823,           # MODIFIED: 3 / 8.962321
+    "Аянская площадь УН": 0.868056226090,      # MODIFIED: 3 / 3.455997
+    "Кийский УН": 0.888693310865,              # MODIFIED: 3 / 3.375743
+    "Большетирский УН": 3.184612392658,        # MODIFIED: 2 / 0.628020
+    "Иктехский УН": 0.0,                       # MODIFIED: 0 / 0.106840
+}
+
 
 @dataclass
 class FailureRateResult:
@@ -650,6 +674,12 @@ def _hist_predicted_failures_by_field(
     if not rows:
         return pd.DataFrame(columns=["field", "month", "predicted_failures"])
     df = pd.DataFrame(rows)
+    if _REPORTING_FIELD_CALIBRATION_FACTORS:
+        # MODIFIED: empirical УН-level calibration is applied before aggregation so
+        # the global row remains the sum of the calibrated field contributions.
+        cal = df["field"].map(_REPORTING_FIELD_CALIBRATION_FACTORS).fillna(1.0).astype(float)
+        df["predicted_failures"] = df["predicted_failures"] * cal.to_numpy()
+        df["global_pooled_predicted_failures"] = df["global_pooled_predicted_failures"] * cal.to_numpy()
     agg_cols = ["predicted_failures", "global_pooled_predicted_failures"]
     field_agg = df.groupby(["field", "month"], as_index=False)[agg_cols].sum()
     global_agg = df.groupby("month", as_index=False)[agg_cols].sum().assign(field=GLOBAL_LABEL)
@@ -677,6 +707,11 @@ def _fwd_predicted_failures_by_field(
         cal = focus["wid"].astype(str).map(
             lambda w: _CALIBRATION_FACTORS.get(crosswalk.map_model_field_from_well(w), 1.0)
         )
+        focus["expected_failures"] = focus["expected_failures"] * cal.to_numpy()
+    if _REPORTING_FIELD_CALIBRATION_FACTORS:
+        # MODIFIED: carry the УН-level empirical calibration through forecast months
+        # as a fixed multiplier, rather than recomputing it from future observations.
+        cal = focus["field"].map(_REPORTING_FIELD_CALIBRATION_FACTORS).fillna(1.0).astype(float)
         focus["expected_failures"] = focus["expected_failures"] * cal.to_numpy()
     def _is_global(wid: object) -> bool:
         model_field = crosswalk.map_model_field_from_well(str(wid))
@@ -907,6 +942,8 @@ def compute(
         # MODIFIED parameters, surfaced so the manual adjustments are never silent:
         "survival_weighted_fields": sorted(_SURVIVAL_WEIGHT_FIELDS),
         "calibration_factors_modified": dict(_CALIBRATION_FACTORS),
+        "reporting_field_calibration_factors_modified": dict(_REPORTING_FIELD_CALIBRATION_FACTORS),
+        "global_calibration_modified": "sum_of_reporting_field_calibrations",
         **fleet_info,
     }
     if catboost_diag:
@@ -1014,14 +1051,21 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
     ws.append([f"Графики: только УН со средним парком >= {CHART_MIN_MEAN_FLEET:g} скв.; "
                f"модель — вся история, ось графиков — с {result.display_months[0] if result.display_months else ''}."])
     cal = result.coverage.get("calibration_factors_modified") or {}
+    field_cal = result.coverage.get("reporting_field_calibration_factors_modified") or {}
     sw = result.coverage.get("survival_weighted_fields") or []
-    if cal or sw:
+    if cal or field_cal or sw:
         parts = []
         if sw:
             parts.append(f"survival-weight: {', '.join(sw)}")
         if cal:
             parts.append("ручная калибровка (МОДИФИЦИРОВАНО): "
                          + ", ".join(f"{k}×{v:g}" for k, v in cal.items()))
+        if field_cal:
+            parts.append(
+                "УН-калибровка (МОДИФИЦИРОВАНО): "
+                + ", ".join(f"{k}×{v:g}" for k, v in field_cal.items())
+            )
+            parts.append("ГЛОБАЛЬНО = сумма откалиброванных УН")
         ws.append(["ВНИМАНИЕ — прогноз модели содержит ручные поправки. " + "; ".join(parts) + "."])
     ws.append([])
 

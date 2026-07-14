@@ -1,6 +1,15 @@
 Attribute VB_Name = "mdlProductionRiskLauncher"
 Option Explicit
 
+Private Const MODEL_CALIBRATION_NOTE As String = "ВНИМАНИЕ: прогноз отказов содержит явно отмеченные ручные поправки (Mc survival-weight, Ya/Vt и УН-калибровка; глобально = сумма УН)."
+
+Private Sub EnsureCalibrationNote(ByVal ws As Worksheet)
+    ws.Range("A14").Value = "Поправки модели"
+    ws.Range("A14").Font.Bold = True
+    ws.Range("B14").Value = MODEL_CALIBRATION_NOTE
+    ws.Range("B14").WrapText = True
+End Sub
+
 Private Function QuoteArg(ByVal value As String) As String
     QuoteArg = Chr$(34) & Replace(value, Chr$(34), Chr$(34) & Chr$(34)) & Chr$(34)
 End Function
@@ -51,6 +60,7 @@ Public Sub RunProductionRisk()
     Set ws = ThisWorkbook.Worksheets(1)
     Set shell = CreateObject("WScript.Shell")
     Set fso = CreateObject("Scripting.FileSystemObject")
+    EnsureCalibrationNote ws
 
     exePath = RequiredPath(ws, "B8", "Executable")
     command = QuoteArg(exePath)

@@ -26,6 +26,30 @@ if ($needInstall) {
 }
 $ErrorActionPreference = $prevEap
 
+# Preflight the shipped calibration hooks before freezing.  This does not run the
+# forecast or build outputs; it only prevents accidentally packaging a source tree
+# where the manually marked failure-rate calibration layer has been dropped.
+$preflight = @'
+from analysis.workflows.production_risk import failure_rate as fr
+
+required = (
+    "_SURVIVAL_WEIGHT_FIELDS",
+    "_CALIBRATION_FACTORS",
+    "_REPORTING_FIELD_CALIBRATION_FACTORS",
+)
+missing = [name for name in required if not getattr(fr, name, None)]
+if missing:
+    raise SystemExit("missing failure-rate calibration hooks: " + ", ".join(missing))
+print(
+    "Failure-rate calibration preflight: "
+    f"survival={sorted(fr._SURVIVAL_WEIGHT_FIELDS)}; "
+    f"model_fields={sorted(fr._CALIBRATION_FACTORS)}; "
+    f"reporting_fields={len(fr._REPORTING_FIELD_CALIBRATION_FACTORS)}"
+)
+'@
+& $Python -c $preflight
+if ($LASTEXITCODE -ne 0) { throw "failure-rate calibration preflight failed" }
+
 $pyInstallerArgs = @(
     "--noconfirm",
     "--clean",
