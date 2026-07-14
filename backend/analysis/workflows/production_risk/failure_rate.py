@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
+from typing import Callable
 import warnings
 
 import numpy as np
@@ -223,13 +224,34 @@ def _fleet_size_hybrid(
     return out[["field", "month", "fleet_size", "fleet_basis"]], info
 
 
+# Planned-intervention pull reasons in WellsArtificialLiftBig that are NOT ESP
+# failures: ГТМ (геолого-техническое мероприятие) and ППР (планово-предупредительный
+# ремонт).  Big fills a «Дата отказа» for these workovers too, so counting every
+# fail_date over-states the failure numerator (≈2× for Мирнинский).  The survival
+# model trains on genuine failures only (event=1 requires a failed component), so
+# the factual numerator must exclude these.  «Свод» (the failures register,
+# Failure Flag=1) is already clean; this filter applies to the Big supplement only.
+_WORKOVER_PULL_REASONS: frozenset[str] = frozenset({"ГТМ", "ППР"})
+
+
+def _is_failure_pull(reason: object) -> bool:
+    """True if a Big pull with a fail_date is a genuine failure (not a workover)."""
+    if reason is None or (isinstance(reason, float) and pd.isna(reason)):
+        return True  # dated pull, no recorded reason → treat as a failure
+    return str(reason).strip().upper() not in _WORKOVER_PULL_REASONS
+
+
 def _observed_failures_by_field(
     esp_source, well_field: dict[str, str], months: set[str], equipment_big_path: Path | None = None
 ) -> pd.DataFrame:
-    """Actual failures by month, restricted to master wells.
+    """Actual **failures** by month (event=1), restricted to master wells.
 
-    ``Свод`` is supplemented with Big failure dates because Big is also used for
-    historical install intervals.  This keeps fact and model populations aligned.
+    ``Свод`` (Failure Flag=1) is the curated failure register and is used as-is.
+    It is supplemented with Big failure dates (Big is also used for historical
+    install intervals, keeping fact and model populations aligned), but **only for
+    genuine failures** — Big pulls coded as planned workovers (ГТМ / ППР) carry a
+    «Дата отказа» yet are not ESP failures, so they are excluded (see
+    ``_WORKOVER_PULL_REASONS``).  Censored runs (no fail_date) are excluded already.
     """
     rows: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -258,6 +280,8 @@ def _observed_failures_by_field(
             fail = record.get("fail")
             if fail is None:
                 continue
+            if not _is_failure_pull(record.get("pull_reason")):
+                continue  # planned workover (ГТМ/ППР), not a failure
             month = fail.strftime("%Y-%m")
             day = fail.strftime("%Y-%m-%d")
             seen_key = (code, day)
@@ -339,6 +363,7 @@ def _big_runs_by_well(path_key: str = "") -> dict[str, list[dict]]:
                     "fail": fail.to_pydatetime() if pd.notna(fail) else None,
                     "end": min(end_candidates) if end_candidates else None,
                     "nno_days": row.get("nno_days"),
+                    "pull_reason": row.get("pull_reason"),
                 }
             )
         if records:
@@ -369,8 +394,19 @@ def _append_interval_predictions(
     params: dict[str, float],
     total_op: float | None,
     global_pooled: bool = False,
+    p_fail_fn: Callable[[dict[int, float], float], float] | None = None,
 ) -> None:
-    """Append non-renewal expected failures over one observed pump interval."""
+    """Append non-renewal expected failures over one observed pump interval.
+
+    ``p_fail_fn(age_pmf, op_days) -> float`` is the pluggable survival hook: its default is
+    the Weibull ``current_pump_p_fail`` closure (so the Weibull line stays byte-identical),
+    and the CatBoost comparison injects an ``S_cb``-backed closure.  Only the survival curve
+    differs between the two model lines — every other line here (month slicing, aging,
+    exposure via ``uptime_factor``/plan op-days) is shared, by construction.
+    """
+    if p_fail_fn is None:
+        def p_fail_fn(age_pmf: dict[int, float], op_days: float) -> float:
+            return current_pump_p_fail(age_pmf, params, op_days, model)
     slices: list[tuple[str, float, float]] = []
     for month in months:
         m_start = pd.Period(month, freq="M").start_time.to_pydatetime()
@@ -403,7 +439,7 @@ def _append_interval_predictions(
             op_days_month = float(total_op) * (overlap / span_days)
             m_start = pd.Period(month, freq="M").start_time.to_pydatetime()
             age_start = float(total_op) * (max((m_start - start).days, 0) / span_days)
-            p = current_pump_p_fail({int(round(age_start)): 1.0}, params, op_days_month, model)
+            p = p_fail_fn({int(round(age_start)): 1.0}, op_days_month)
             if p > 0:
                 rows.append({
                     "field": field,
@@ -417,7 +453,7 @@ def _append_interval_predictions(
     age = 0.0
     for month, overlap, _ in slices:
         op_days_month = max(0.0, overlap * uptime)
-        p = current_pump_p_fail({int(round(age)): 1.0}, params, op_days_month, model)
+        p = p_fail_fn({int(round(age)): 1.0}, op_days_month)
         if p > 0:
             rows.append({
                 "field": field,
@@ -438,8 +474,13 @@ def _hist_predicted_failures_by_field(
     months: list[str],
     forecast_first: str,
     equipment_big_path: Path | None = None,
+    p_fail_provider: Callable[[str, datetime, str], Callable[[dict[int, float], float], float]] | None = None,
 ) -> pd.DataFrame:
     """Weibull-predicted failures per month over history from observed intervals.
+
+    ``p_fail_provider(code, start, field) -> p_fail_fn`` swaps the survival curve for the
+    CatBoost comparison line; when ``None`` the Weibull ``current_pump_p_fail`` closure is
+    used, so the two lines share identical month-slicing/aging/exposure by construction.
 
     ``WellsArtificialLiftBig`` is primary when available because it carries many
     replacement starts that are absent from ``Свод``.  ``Свод`` is still used for
@@ -523,6 +564,7 @@ def _hist_predicted_failures_by_field(
                 params=params,
                 total_op=total_op,
                 global_pooled=stratum == "Global_Pooled",
+                p_fail_fn=p_fail_provider(code, start, field) if p_fail_provider else None,
             )
 
     # Свод-only fallback for wells absent from Big.
@@ -558,6 +600,7 @@ def _hist_predicted_failures_by_field(
                 params=params,
                 total_op=_as_positive_float(run.age_op),
                 global_pooled=stratum == "Global_Pooled",
+                p_fail_fn=p_fail_provider(code, start, field) if p_fail_provider else None,
             )
     if not rows:
         return pd.DataFrame(columns=["field", "month", "predicted_failures"])
@@ -604,6 +647,83 @@ def _fwd_predicted_failures_by_field(
     return pd.concat([field_agg, global_agg], ignore_index=True)
 
 
+def build_well_field(plan) -> dict[str, str]:
+    """well code -> master УН reporting group (only master wells feed a group's fleet)."""
+    meta = plan.producer_meta
+    well_field: dict[str, str] = {}
+    for wid in meta.index:
+        raw = str(meta.at[wid, "license_area"]) if "license_area" in meta.columns else ""
+        if not raw.strip() and "plan_field" in meta.columns:
+            raw = str(meta.at[wid, "plan_field"])
+        well_field[str(wid)] = raw.strip() if raw and raw.strip() else "Без УН"
+    return well_field
+
+
+def _attach_catboost_columns(
+    monthly: pd.DataFrame,
+    *,
+    plan,
+    esp_source,
+    projection: pd.DataFrame,
+    scenario_id: str,
+    model: StrataModel,
+    well_field: dict[str, str],
+    months: list[str],
+    forecast_first: str,
+    equipment_big_path: Path | None,
+    fleet_pos: np.ndarray,
+    catboost_model=None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Add the parallel CatBoost failure-rate columns; return (monthly, diagnostics).
+
+    Runs the identical history replay with the survival curve swapped for the CatBoost
+    ``S_cb`` (in-sample and cross-fit variants).  CatBoost columns are NaN from
+    ``forecast_first`` on — there is no CatBoost renewal forecast (§1 of the handoff).  The
+    Weibull columns already on ``monthly`` are never touched.
+    """
+    from analysis.workflows.production_risk import failure_rate_catboost as cbfr
+
+    cb_model = catboost_model
+    if cb_model is None:
+        cb_model = cbfr.build_model(well_field)
+
+    fleet_pos = np.asarray(fleet_pos, dtype=bool)
+    forecast_mask = monthly["month"].to_numpy() >= forecast_first
+    diag_out: dict[str, object] = {}
+
+    variants = (("xfit", "_catboost_xfit"), ("insample", "_catboost"))
+    for variant, suffix in variants:
+        diag = cbfr._ReplayDiag()
+        provider = (
+            lambda code, start, field, _v=variant, _d=diag: cb_model.p_fail_fn(code, start, field, _v, _d)
+        )
+        agg = _hist_predicted_failures_by_field(
+            plan, esp_source, projection, scenario_id, model, well_field, months,
+            forecast_first, equipment_big_path, p_fail_provider=provider,
+        )
+        fail_col = f"predicted_failures{suffix}"
+        rate_col = f"predicted_rate{suffix}"
+        if agg.empty:
+            merged = monthly.assign(**{fail_col: 0.0})
+        else:
+            take = agg[["field", "month", "predicted_failures"]].rename(columns={"predicted_failures": fail_col})
+            merged = monthly.merge(take, on=["field", "month"], how="left")
+            merged[fail_col] = merged[fail_col].fillna(0.0)
+        # CatBoost only spans history; blank the forecast window (no ML renewal line).
+        merged.loc[forecast_mask, fail_col] = np.nan
+        merged[rate_col] = np.where(fleet_pos, merged[fail_col] / merged["fleet_size"], np.nan)
+        merged.loc[forecast_mask, rate_col] = np.nan
+        monthly = merged
+        if variant == "xfit":  # headline diagnostics come from the cross-fit pass
+            cov = diag.covariate_share_by_field()
+            tail = diag.past_b90_share_by_field()
+            diag_out["catboost_covariate_share"] = float(cov.get("__global__", float("nan")))
+            diag_out["catboost_covariate_share_by_field"] = {k: v for k, v in cov.items() if k != "__global__"}
+            diag_out["catboost_past_b90_share"] = float(tail.get("__global__", float("nan")))
+            diag_out["catboost_past_b90_share_by_field"] = {k: v for k, v in tail.items() if k != "__global__"}
+    return monthly, diag_out
+
+
 def compute(
     plan,
     esp_source,
@@ -611,6 +731,7 @@ def compute(
     cfg: C.RunConfig,
     scenario_id: str = C.PRIMARY_SCENARIO_ID,
     model: StrataModel | None = None,
+    catboost_model=None,
 ) -> FailureRateResult:
     model = model or StrataModel(bundle_date=cfg.bundle_date)
     forecast_last = max(str(cfg.horizon_end.strftime("%Y-%m")), max(plan.months))
@@ -619,13 +740,7 @@ def compute(
     forecast_first = cfg.forecast_start.strftime("%Y-%m")
 
     # well -> master УН (only master wells contribute to a reporting group's fleet)
-    meta = plan.producer_meta
-    well_field: dict[str, str] = {}
-    for wid in meta.index:
-        raw = str(meta.at[wid, "license_area"]) if "license_area" in meta.columns else ""
-        if not raw.strip() and "plan_field" in meta.columns:
-            raw = str(meta.at[wid, "plan_field"])
-        well_field[str(wid)] = raw.strip() if raw and raw.strip() else "Без УН"
+    well_field = build_well_field(plan)
 
     fleet, fleet_info = _fleet_size_hybrid(plan, esp_source, well_field, months, cfg.equipment_big_path)
     observed = _observed_failures_by_field(esp_source, well_field, set(months), cfg.equipment_big_path)
@@ -662,6 +777,25 @@ def compute(
     fleet_pos = monthly["fleet_size"] > 0
     monthly["observed_rate"] = np.where(fleet_pos, monthly["observed_failures"] / monthly["fleet_size"], np.nan)
     monthly["predicted_rate"] = np.where(fleet_pos, monthly["predicted_failures"] / monthly["fleet_size"], np.nan)
+
+    # --- Parallel CatBoost line (comparison only; Weibull columns above untouched) ---
+    catboost_diag: dict[str, object] = {}
+    if getattr(cfg, "enable_catboost_compare", False):
+        monthly, catboost_diag = _attach_catboost_columns(
+            monthly,
+            plan=plan,
+            esp_source=esp_source,
+            projection=projection,
+            scenario_id=scenario_id,
+            model=model,
+            well_field=well_field,
+            months=months,
+            forecast_first=forecast_first,
+            equipment_big_path=cfg.equipment_big_path,
+            fleet_pos=fleet_pos,
+            catboost_model=catboost_model,
+        )
+
     if last_obs_month is not None:
         beyond = monthly["month"] > last_obs_month
         monthly.loc[beyond, "observed_rate"] = np.nan
@@ -720,6 +854,8 @@ def compute(
         "global_pooled_share_by_field": fallback_share_by_field,
         **fleet_info,
     }
+    if catboost_diag:
+        coverage.update(catboost_diag)
     return FailureRateResult(
         months=months,
         display_months=display_months,
