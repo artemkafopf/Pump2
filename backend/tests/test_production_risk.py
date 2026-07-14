@@ -595,8 +595,10 @@ def test_failure_rate_fleet_observed_and_forecast():
     # one actual failure (Failure Flag=1, stop in 2026-05)
     assert g.at["2026-05", "observed_failures"] == 1.0
     assert abs(g.at["2026-05", "observed_rate"] - 0.5) < 1e-9
-    # forecast month uses the sanctioned projection expected_failures; observed is blanked
-    assert abs(g.at["2026-07", "predicted_failures"] - 0.15) < 1e-9
+    # forecast month uses the sanctioned projection expected_failures; observed is blanked.
+    # YA wells carry the manual Ya calibration (_CALIBRATION_FACTORS["Ya"]=0.756):
+    # (0.10 + 0.05) * 0.756 = 0.1134.
+    assert abs(g.at["2026-07", "predicted_failures"] - 0.15 * fr._CALIBRATION_FACTORS["Ya"]) < 1e-9
     assert math.isnan(g.at["2026-07", "observed_rate"])
     # history months carry a Weibull prediction driven by observed install intervals
     assert g.loc[["2026-05", "2026-06"], "predicted_failures"].sum() >= 0.0

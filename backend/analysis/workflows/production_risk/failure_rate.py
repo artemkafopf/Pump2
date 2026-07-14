@@ -66,6 +66,31 @@ FACT_DISPLAY_FIRST_MONTH = "2024-01"
 # does not promote a tiny long-lived field just for accumulating failures slowly.
 CHART_MIN_MEAN_FLEET = 12.0
 
+# EXPERIMENTAL: model-field strata whose history line is survival-weighted (mass
+# decays as it fails, so a pump's expected failures telescope to F(age)=1-S(age)
+# instead of the over-counting conditional-hazard sum).  Scoped per-stratum because
+# the effect is not uniform: it corrects Mc/Мирнинский (fact/model 0.60 -> 0.92) but
+# OVERSHOOTS long-lived Ya (0.76 -> 1.65, failed pumps under-credited at F<1), so Ya
+# is left on the unweighted line.  Empty set = today's behaviour fleet-wide.
+_SURVIVAL_WEIGHT_FIELDS: frozenset[str] = frozenset({"Mc"})
+
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │ MODIFIED PARAMETERS — MANUAL EMPIRICAL CALIBRATION (not a survival-model fit) │
+# └─────────────────────────────────────────────────────────────────────────────┘
+# The base strata Weibulls run hot on Ya/Vt: over the fact window 2024-01..2026-04
+# they over-predict genuine failures (fact/model Ya=235/311=0.76, Vt=251/300=0.84).
+# Survival-weighting overshoots these long-lived strata, so their residual is closed
+# with a fixed multiplicative calibration instead.  Determined ONCE (2026-07-14) from
+# that window and HELD CONSTANT — do NOT recompute per run (that would force the ratio
+# to 1 by construction and hide model drift).  Applied to both history and forecast.
+# These are hand-set adjustments layered on top of the model; they are surfaced in the
+# «Интенсивность отказов» sheet header and the coverage diagnostics so the modification
+# is never silent.
+_CALIBRATION_FACTORS: dict[str, float] = {
+    "Ya": 0.756,   # Ярактинский — MODIFIED (fact/model over 2024-01..2026-04)
+    "Vt": 0.837,   # Верхнетирский — MODIFIED (fact/model over 2024-01..2026-04)
+}
+
 
 @dataclass
 class FailureRateResult:
@@ -395,6 +420,8 @@ def _append_interval_predictions(
     total_op: float | None,
     global_pooled: bool = False,
     p_fail_fn: Callable[[dict[int, float], float], float] | None = None,
+    survival_weight: bool = False,
+    calibration: float = 1.0,
 ) -> None:
     """Append non-renewal expected failures over one observed pump interval.
 
@@ -403,6 +430,12 @@ def _append_interval_predictions(
     and the CatBoost comparison injects an ``S_cb``-backed closure.  Only the survival curve
     differs between the two model lines — every other line here (month slicing, aging,
     exposure via ``uptime_factor``/plan op-days) is shared, by construction.
+
+    ``survival_weight`` (experimental, per-stratum): when True the monthly conditional
+    failure probability is weighted by the running survival mass and that mass is decayed,
+    so a pump's expected failures over its interval telescope to ``F(age)=1-S(age)`` instead
+    of the inflated conditional-hazard sum (``≈ -ln S``).  This matches how the forward
+    ``project_well`` decays age-mass and removes the systematic history over-count.
     """
     if p_fail_fn is None:
         def p_fail_fn(age_pmf: dict[int, float], op_days: float) -> float:
@@ -435,11 +468,13 @@ def _append_interval_predictions(
         span_days = max((end - start).days, 0)
         if span_days <= 0:
             return
+        surv = 1.0
         for month, overlap, _ in slices:
             op_days_month = float(total_op) * (overlap / span_days)
             m_start = pd.Period(month, freq="M").start_time.to_pydatetime()
             age_start = float(total_op) * (max((m_start - start).days, 0) / span_days)
-            p = p_fail_fn({int(round(age_start)): 1.0}, op_days_month)
+            p_cond = p_fail_fn({int(round(age_start)): 1.0}, op_days_month)
+            p = (surv * p_cond if survival_weight else p_cond) * calibration
             if p > 0:
                 rows.append({
                     "field": field,
@@ -447,13 +482,17 @@ def _append_interval_predictions(
                     "predicted_failures": float(p),
                     "global_pooled_predicted_failures": float(p) if global_pooled else 0.0,
                 })
+            if survival_weight:
+                surv *= max(0.0, 1.0 - p_cond)
         return
 
     uptime = _as_positive_float(params.get("uptime_factor")) or 1.0
     age = 0.0
+    surv = 1.0
     for month, overlap, _ in slices:
         op_days_month = max(0.0, overlap * uptime)
-        p = p_fail_fn({int(round(age)): 1.0}, op_days_month)
+        p_cond = p_fail_fn({int(round(age)): 1.0}, op_days_month)
+        p = (surv * p_cond if survival_weight else p_cond) * calibration
         if p > 0:
             rows.append({
                 "field": field,
@@ -461,6 +500,8 @@ def _append_interval_predictions(
                 "predicted_failures": float(p),
                 "global_pooled_predicted_failures": float(p) if global_pooled else 0.0,
             })
+        if survival_weight:
+            surv *= max(0.0, 1.0 - p_cond)
         age += op_days_month
 
 
@@ -565,6 +606,8 @@ def _hist_predicted_failures_by_field(
                 total_op=total_op,
                 global_pooled=stratum == "Global_Pooled",
                 p_fail_fn=p_fail_provider(code, start, field) if p_fail_provider else None,
+                survival_weight=model_field in _SURVIVAL_WEIGHT_FIELDS,
+                calibration=_CALIBRATION_FACTORS.get(model_field, 1.0),
             )
 
     # Свод-only fallback for wells absent from Big.
@@ -601,6 +644,8 @@ def _hist_predicted_failures_by_field(
                 total_op=_as_positive_float(run.age_op),
                 global_pooled=stratum == "Global_Pooled",
                 p_fail_fn=p_fail_provider(code, start, field) if p_fail_provider else None,
+                survival_weight=model_field in _SURVIVAL_WEIGHT_FIELDS,
+                calibration=_CALIBRATION_FACTORS.get(model_field, 1.0),
             )
     if not rows:
         return pd.DataFrame(columns=["field", "month", "predicted_failures"])
@@ -626,6 +671,13 @@ def _fwd_predicted_failures_by_field(
     focus["field"] = focus["wid"].astype(str).map(well_field).fillna("Без УН")
     focus["field"] = focus["field"].astype(str).replace("", "Без УН")
     focus["expected_failures"] = pd.to_numeric(focus["expected_failures"], errors="coerce").fillna(0.0)
+    if _CALIBRATION_FACTORS:
+        # MODIFIED: apply the same manual Ya/Vt calibration to the forecast so the
+        # single model line is coherent across the history/forecast boundary.
+        cal = focus["wid"].astype(str).map(
+            lambda w: _CALIBRATION_FACTORS.get(crosswalk.map_model_field_from_well(w), 1.0)
+        )
+        focus["expected_failures"] = focus["expected_failures"] * cal.to_numpy()
     def _is_global(wid: object) -> bool:
         model_field = crosswalk.map_model_field_from_well(str(wid))
         _, stratum = model.resolve(model_field, "nonsour", "Pooled")
@@ -852,6 +904,9 @@ def compute(
         "chart_min_mean_fleet": CHART_MIN_MEAN_FLEET,
         "chart_fields": chart_fields,
         "global_pooled_share_by_field": fallback_share_by_field,
+        # MODIFIED parameters, surfaced so the manual adjustments are never silent:
+        "survival_weighted_fields": sorted(_SURVIVAL_WEIGHT_FIELDS),
+        "calibration_factors_modified": dict(_CALIBRATION_FACTORS),
         **fleet_info,
     }
     if catboost_diag:
@@ -958,6 +1013,16 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
                f"последний факт-месяц={result.coverage['last_observed_month']}"])
     ws.append([f"Графики: только УН со средним парком >= {CHART_MIN_MEAN_FLEET:g} скв.; "
                f"модель — вся история, ось графиков — с {result.display_months[0] if result.display_months else ''}."])
+    cal = result.coverage.get("calibration_factors_modified") or {}
+    sw = result.coverage.get("survival_weighted_fields") or []
+    if cal or sw:
+        parts = []
+        if sw:
+            parts.append(f"survival-weight: {', '.join(sw)}")
+        if cal:
+            parts.append("ручная калибровка (МОДИФИЦИРОВАНО): "
+                         + ", ".join(f"{k}×{v:g}" for k, v in cal.items()))
+        ws.append(["ВНИМАНИЕ — прогноз модели содержит ручные поправки. " + "; ".join(parts) + "."])
     ws.append([])
 
     # ---- wide rate matrix: month | <field>_факт | <field>_прогноз ... ----
