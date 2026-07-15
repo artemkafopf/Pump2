@@ -139,6 +139,45 @@ def _well_arrays(plan: PlanData, wid: str) -> tuple[np.ndarray, np.ndarray, np.n
     return oil, liq, op, cal
 
 
+def _apply_time_map_idle_exposure(
+    plan: PlanData,
+    wid: str,
+    model: StrataModel,
+    model_field: str | None,
+    reporting_field: str,
+    age_start: float,
+    op_days: np.ndarray,
+    cal_days: np.ndarray,
+) -> tuple[np.ndarray, float, str]:
+    """Add reduced hazard exposure in plan-idle months when the bundle map says so."""
+    time_map = getattr(model, "time_map", None)
+    if time_map is None or not getattr(time_map, "available", False):
+        return op_days, 0.0, "none"
+    idle_frac, idle_source = time_map.idle_fraction(reporting_field, model_field)
+    if idle_frac <= 0.0:
+        return op_days, 0.0, idle_source
+    out = op_days.astype(float, copy=True)
+    age = max(0.0, float(age_start))
+    added = 0.0
+    for idx, month in enumerate(plan.fwd_months):
+        if idx >= len(out) or idx >= len(cal_days):
+            break
+        if out[idx] > 0.0:
+            age += float(out[idx])
+            continue
+        uptime, _ = time_map.predict_uptime(
+            model_field,
+            age,
+            pd.Period(month, freq="M").month,
+            fallback=0.0,
+        )
+        extra = max(0.0, float(cal_days[idx]) * float(uptime) * float(idle_frac))
+        out[idx] = extra
+        added += extra
+        age += extra
+    return out, float(added), idle_source
+
+
 def build_well_states(
     plan: PlanData,
     esp_source: EspSource,
@@ -231,6 +270,16 @@ def build_well_states(
                 scope_label = "excluded_non_esp"
 
         age_mean = weighted_age_mean(age_pmf)
+        op_for_hazard, idle_op_added, idle_op_source = _apply_time_map_idle_exposure(
+            plan,
+            wid,
+            model,
+            model_field,
+            str(meta.get("plan_field", "")),
+            age_mean,
+            op,
+            cal,
+        )
         first_gtm_date = gtm_row.get("first_gtm_date")
         event_90d_flag = bool(gtm_row.get("event_90d_flag", False))
         states.append(
@@ -259,7 +308,7 @@ def build_well_states(
                 include_primary=include_primary,
                 oil_volume=oil,
                 liquid_volume=liq,
-                op_days=op,
+                op_days=op_for_hazard,
                 cal_days=cal,
                 first_active_month=meta.get("first_active_month"),
                 first_gtm_date=first_gtm_date,
@@ -295,6 +344,8 @@ def build_well_states(
                 "registry_oil_positive_months": int(meta.get("registry_oil_positive_months", 0)),
                 "registry_liquid_positive_months": int(meta.get("registry_liquid_positive_months", 0)),
                 "summary_positive_months": int(meta.get("summary_positive_months", 0)),
+                "time_map_idle_op_days_added": round(float(idle_op_added), 3),
+                "time_map_idle_source": idle_op_source,
             }
         )
 

@@ -178,6 +178,7 @@ def _write_full_tables(
         str(C.model_registry_path(cfg.bundle_date)),
         str(C.hazard_coeffs_path(cfg.bundle_date)),
         str(C.run_covariates_path(cfg.bundle_date)),
+        str(C.time_map_path(cfg.bundle_date)),
     ])
     return out
 

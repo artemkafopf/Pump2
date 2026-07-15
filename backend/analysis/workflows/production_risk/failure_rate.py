@@ -48,6 +48,7 @@ from openpyxl.utils import get_column_letter
 from analysis.workflows.production_risk import config as C
 from analysis.workflows.production_risk import crosswalk
 from analysis.workflows.production_risk.survival import StrataModel, current_pump_p_fail
+from analysis.workflows.production_risk.time_map import TimeMap, interval_slices
 
 GLOBAL_LABEL = "ГЛОБАЛЬНО"
 RATE_SHEET = "Интенсивность отказов"
@@ -446,6 +447,7 @@ def _append_interval_predictions(
     p_fail_fn: Callable[[dict[int, float], float], float] | None = None,
     survival_weight: bool = False,
     calibration: float = 1.0,
+    time_map: TimeMap | None = None,
 ) -> None:
     """Append non-renewal expected failures over one observed pump interval.
 
@@ -464,6 +466,35 @@ def _append_interval_predictions(
     if p_fail_fn is None:
         def p_fail_fn(age_pmf: dict[int, float], op_days: float) -> float:
             return current_pump_p_fail(age_pmf, params, op_days, model)
+
+    mapped = interval_slices(
+        months=months,
+        start=start,
+        end=end,
+        code=code,
+        reporting_field=field,
+        model_field=crosswalk.map_model_field_from_well(code),
+        total_op=total_op,
+        fallback_uptime=_as_positive_float(params.get("uptime_factor")) or 1.0,
+        time_map=time_map or TimeMap.missing(),
+        plan=plan,
+        active=active,
+    )
+    if mapped:
+        surv = 1.0
+        for sl in mapped:
+            p_cond = p_fail_fn({int(round(sl.age_start)): 1.0}, sl.op_days)
+            p = (surv * p_cond if survival_weight else p_cond) * calibration
+            if p > 0:
+                rows.append({
+                    "field": field,
+                    "month": sl.month,
+                    "predicted_failures": float(p),
+                    "global_pooled_predicted_failures": float(p) if global_pooled else 0.0,
+                })
+            if survival_weight:
+                surv *= max(0.0, 1.0 - p_cond)
+        return
     slices: list[tuple[str, float, float]] = []
     for month in months:
         m_start = pd.Period(month, freq="M").start_time.to_pydatetime()
@@ -559,6 +590,7 @@ def _hist_predicted_failures_by_field(
     cutoff = esp_source.source_cutoff or datetime(2026, 6, 1)
     forecast_start = pd.Period(forecast_first, freq="M").start_time.to_pydatetime()
     rows: list[dict] = []
+    time_map = getattr(model, "time_map", TimeMap.missing())
 
     svod_by_key: dict[str, list] = {}
     for code, runs in esp_source.runs_by_well.items():
@@ -632,6 +664,7 @@ def _hist_predicted_failures_by_field(
                 p_fail_fn=p_fail_provider(code, start, field) if p_fail_provider else None,
                 survival_weight=model_field in _SURVIVAL_WEIGHT_FIELDS,
                 calibration=_CALIBRATION_FACTORS.get(model_field, 1.0),
+                time_map=time_map,
             )
 
     # Свод-only fallback for wells absent from Big.
@@ -670,6 +703,7 @@ def _hist_predicted_failures_by_field(
                 p_fail_fn=p_fail_provider(code, start, field) if p_fail_provider else None,
                 survival_weight=model_field in _SURVIVAL_WEIGHT_FIELDS,
                 calibration=_CALIBRATION_FACTORS.get(model_field, 1.0),
+                time_map=time_map,
             )
     if not rows:
         return pd.DataFrame(columns=["field", "month", "predicted_failures"])

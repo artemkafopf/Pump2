@@ -100,6 +100,10 @@ def run_covariates_path(bundle_date: str = BUNDLE_DATE) -> Path:
     return bundle_dir(bundle_date) / "esp_run_covariates.csv"
 
 
+def time_map_path(bundle_date: str = BUNDLE_DATE) -> Path:
+    return bundle_dir(bundle_date) / "esp_time_map.csv"
+
+
 @dataclass(frozen=True)
 class ScenarioSpec:
     scenario_id: str

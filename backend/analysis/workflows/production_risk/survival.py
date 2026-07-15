@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from analysis.workflows.production_risk import config as C
+from analysis.workflows.production_risk.time_map import TimeMap
 
 
 @dataclass
@@ -54,6 +55,7 @@ class StrataModel:
         self.df = df.copy()
         self.by_stratum = df.set_index("stratum").to_dict("index")
         self._q_cache: dict[tuple[float, ...], np.ndarray] = {}
+        self.time_map = TimeMap.from_csv(C.time_map_path(bundle_date))
 
     def resolve(self, field: str | None, sour: str, ctr: str) -> tuple[dict[str, float], str]:
         keys: list[str] = []
