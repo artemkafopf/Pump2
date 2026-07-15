@@ -55,6 +55,9 @@ _SELECT: dict[str, tuple[str, str | None]] = {
     "field_raw": ("Месторождение", None),
     "pad": ("Куст", None),
     "run_no": ("№ спуска", None),
+    "contractor": ("Насос", "Собственник оборудования"),
+    "purpose": ("Цель спуска", None),
+    "pump_serial": ("Насос", "секц. зав. номер"),  # «1 секц. зав. номер» — stage-1 serial
     "install_date": ("Дата монтажа", None),
     "launch_date": ("Дата запуска", None),
     "fail_date": ("Дата отказа", None),
@@ -111,6 +114,28 @@ _SELECT: dict[str, tuple[str, str | None]] = {
 }
 
 _NON_ESP_PREFIXES = ("ВОРОНКА", "УГРП", "ОТСУТСТВ", "ПАКЕР")
+
+# Non-ESP artificial-lift types that must NOT enter the survival fit even under
+# «Мех. добыча»: ВНН = винтовой насос (screw pump, 242 мех-добыча rows), ШГН/ШВН =
+# rod/sucker-rod pumps.  These share the мех-добыча purpose but are a different
+# machine with a different failure law.
+_SCREW_ROD_PREFIXES = ("ВНН", "ШГН", "ШВН", "УШГН", "ШВНУ")
+
+# Positive REDA / SLB model designations that ARE ESP units but carry no «ЭЦН»
+# token, so the literal-«ЭЦН» test misses them (~167 SLB units).  Matched on the
+# uppercased type string after screw/rod exclusion:
+#   D####N / G####N / S####N  (D3500N, G6200N, S8000N)
+#   GN####                    (GN10000)
+#   ESP 5xx-#### / ESP 4xx-…  (ESP 538-7000)
+#   MT5A-###DP / MT5-###DP    (MT5A-100DP, MT5-125DP)
+_ESP_MODEL_PATTERNS = (
+    re.compile(r"^[DGS]\d{2,5}N\b"),
+    re.compile(r"^GN\d{3,5}\b"),
+    re.compile(r"^ESP\s*\d{3}-\d{2,5}\b"),
+    re.compile(r"^MT5A?-?\d+\s*DP\b"),
+)
+
+_MECH_PRODUCTION = "мех. добыча"  # «Цель спуска» value that flags a producing lift
 
 _COMPONENTS = ("pump", "gassep", "protector", "ped", "tms", "nkt", "cable")
 
@@ -227,6 +252,63 @@ def is_esp_row(gno_type: object) -> bool:
     return not s.upper().startswith(_NON_ESP_PREFIXES)
 
 
+def is_purpose_mech_production(purpose: object) -> bool:
+    """True when «Цель спуска» is «Мех. добыча» (producing lift)."""
+    s = _norm_text(purpose)
+    return s is not None and s.casefold() == _MECH_PRODUCTION
+
+
+def is_esp_type_positive(gno_type: object) -> bool:
+    """Positive ESP-type test: «ЭЦН» families PLUS REDA/SLB model designations,
+    excluding screw/rod pumps (ВНН/ШГН) and the non-lift placeholders.
+
+    This is the vocabulary-driven half of :func:`is_esp_strict`; kept separate so
+    it can be reused on Свод «Тип УЭЦН» text too.
+    """
+    s = _norm_text(gno_type)
+    if s is None:
+        return False
+    u = s.upper()
+    if u.startswith(_SCREW_ROD_PREFIXES) or u.startswith(_NON_ESP_PREFIXES):
+        return False
+    if "ЭЦН" in u:
+        return True
+    return any(p.match(u) for p in _ESP_MODEL_PATTERNS)
+
+
+def is_esp_strict(purpose: object, gno_type: object) -> bool:
+    """Strict ESP-run test (all three A0 gates except contractor):
+
+    «Цель спуска» == «Мех. добыча» AND «Тип ГНО» is an ESP by positive vocabulary
+    (ЭЦН/REDA/SLB), with ВНН/ШГН screw-rod pumps excluded.  The contractor gate is
+    a downstream stratum split, not an inclusion filter, so it is applied by the
+    caller via the ``contractor`` column.
+    """
+    return is_purpose_mech_production(purpose) and is_esp_type_positive(gno_type)
+
+
+def esp_vocab_audit(df: pd.DataFrame) -> pd.DataFrame:
+    """Distinct «Тип ГНО» families under «Мех. добыча» that the positive ESP
+    vocabulary does NOT recognise, with row counts and whether each is a known
+    screw/rod exclusion — for one-time user confirmation that nothing genuine is
+    silently dropped."""
+    mech = df["purpose"].map(is_purpose_mech_production)
+    recognised = df["gno_type"].map(is_esp_type_positive)
+    unknown = df[mech & ~recognised].copy()
+    unknown["gno_norm"] = unknown["gno_type"].map(_norm_text)
+    out = (
+        unknown.groupby("gno_norm", dropna=False)
+        .size()
+        .reset_index(name="n_rows")
+        .sort_values("n_rows", ascending=False)
+        .reset_index(drop=True)
+    )
+    out["is_known_screw_rod"] = out["gno_norm"].map(
+        lambda s: bool(s) and str(s).upper().startswith(_SCREW_ROD_PREFIXES)
+    )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
@@ -293,6 +375,10 @@ def load_equipment_big(path: Path | None = None) -> pd.DataFrame:
         df[col] = to_num(df[col])
 
     df["is_esp"] = df["gno_type"].map(is_esp_row)
+    df["is_esp_strict"] = [
+        is_esp_strict(p, g) for p, g in zip(df["purpose"], df["gno_type"])
+    ]
+    df["pump_serial"] = df["pump_serial"].map(_norm_text)
     df["pull_fail_gap_d"] = (df["pull_date"] - df["fail_date"]).dt.days
     df["launch_delay_d"] = (df["launch_date"] - df["install_date"]).dt.days
 
@@ -339,5 +425,9 @@ __all__ = [
     "norm_gabarit",
     "parse_type_execution_flags",
     "is_esp_row",
+    "is_esp_strict",
+    "is_esp_type_positive",
+    "is_purpose_mech_production",
+    "esp_vocab_audit",
     "REDA_SERIES_OD_MM",
 ]

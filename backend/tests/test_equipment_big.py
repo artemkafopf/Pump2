@@ -10,6 +10,9 @@ for _p in (str(REPO_ROOT), str(REPO_ROOT / "backend")):
 
 from analysis.data.equipment_big import (
     is_esp_row,
+    is_esp_strict,
+    is_esp_type_positive,
+    is_purpose_mech_production,
     norm_coating,
     norm_corrosion_class,
     norm_exec_group,
@@ -101,6 +104,36 @@ class IsEspTests(unittest.TestCase):
             self.assertTrue(is_esp_row(v), v)
 
 
+class EspStrictTests(unittest.TestCase):
+    def test_positive_vocabulary_includes_reda_slb(self):
+        for v in ("30.2 ЭЦНДИК Э", "MT5A-100DP", "MT5-125DP", "G6200N", "S8000N",
+                  "S11000N", "D460N", "D3500N", "GN10000", "ESP 538-7000", "ESP 400-3000"):
+            self.assertTrue(is_esp_type_positive(v), v)
+
+    def test_screw_rod_excluded(self):
+        for v in ("ВНН", "ВНН5", "УВНН", "ШГН", "ШВН", "УШГН"):
+            self.assertFalse(is_esp_type_positive(v), v)
+
+    def test_non_lift_placeholders_excluded(self):
+        for v in ("Воронка НКТ-73", "УГРП на НКТ-89", "Пакер", None):
+            self.assertFalse(is_esp_type_positive(v), v)
+
+    def test_purpose_gate(self):
+        self.assertTrue(is_purpose_mech_production("Мех. добыча"))
+        self.assertTrue(is_purpose_mech_production(" мех. добыча "))
+        for v in ("Водозаборная", "Нагнетательная", "Пьезометр", "ГРП", None):
+            self.assertFalse(is_purpose_mech_production(v), v)
+
+    def test_strict_needs_both_gates(self):
+        # ESP type but wrong purpose (водозаборная) → not a survival unit
+        self.assertFalse(is_esp_strict("Водозаборная", "30.2 ЭЦНДИК Э"))
+        # мех.добыча but screw pump → excluded
+        self.assertFalse(is_esp_strict("Мех. добыча", "ВНН"))
+        # both gates satisfied
+        self.assertTrue(is_esp_strict("Мех. добыча", "G6200N"))
+        self.assertTrue(is_esp_strict("Мех. добыча", "30.2 ЭЦНДИК Э"))
+
+
 @unittest.skipUnless(resolve_equipment_big_path().exists(),
                      "WellsArtificialLiftBig.xlsx not available")
 class LoaderSmokeTests(unittest.TestCase):
@@ -123,6 +156,24 @@ class LoaderSmokeTests(unittest.TestCase):
         self.assertGreater((self.df["pump_coating"] == "monel").sum(), 100)
         self.assertGreater(self.df["pump_exec_group"].notna().sum(), 4000)
         self.assertGreater(self.df["type_corr_resistant"].fillna(False).sum(), 500)
+
+    def test_strict_filter_columns(self):
+        self.assertIn("is_esp_strict", self.df.columns)
+        self.assertIn("purpose", self.df.columns)
+        self.assertIn("pump_serial", self.df.columns)
+        # strict ESP is a subset of the old negative filter and is smaller
+        n_strict = int(self.df["is_esp_strict"].sum())
+        n_old = int(self.df["is_esp"].sum())
+        self.assertGreater(n_strict, 3000)
+        self.assertLess(n_strict, n_old)
+        # every strict-ESP row is мех.добыча
+        mech = self.df["purpose"].map(is_purpose_mech_production)
+        self.assertTrue((~mech[self.df["is_esp_strict"]]).sum() == 0)
+
+    def test_vnn_screw_pumps_excluded_from_strict(self):
+        vnn = self.df["gno_type"].astype(str).str.upper().str.startswith("ВНН")
+        self.assertGreater(int(vnn.sum()), 100)  # ВНН present in workbook
+        self.assertEqual(int(self.df.loc[vnn, "is_esp_strict"].sum()), 0)
 
     def test_pull_fail_gap_median_small(self):
         med = self.df["pull_fail_gap_d"].dropna().median()
