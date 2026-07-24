@@ -181,16 +181,21 @@ def resolve_gtm_schedule_path() -> Path:
 
 
 def resolve_prediction_workbook_path() -> Path:
-    """Newest deployed simple-prediction workbook, else fall back to V03_all.
+    """Production-risk source workbook with the ``Свод`` sheet.
 
     Preference order:
-      1. explicit env var / local mirror
-      2. newest non-backup simple_prediction workbook under the target folder
-      3. V03_all workbook
+      1. explicit env var
+      2. repo-local ``data/inputs/Отказы свод с анализом.xlsx``
+      3. legacy local simple_prediction mirror
+      4. newest non-backup simple_prediction workbook under the target folder
+      5. V03_all workbook
     """
     env_value = os.environ.get("PUMP2_PREDICTION_WORKBOOK_PATH", "").strip()
     if env_value:
         return Path(env_value)
+    local_source = LOCAL_INPUT_DIR / "Отказы свод с анализом.xlsx"
+    if local_source.exists():
+        return local_source
     local_path = LOCAL_INPUT_DIR / "Отказы свод с анализом_БДА_V03_simple_prediction.xlsm"
     if local_path.exists():
         return local_path

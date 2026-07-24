@@ -7,6 +7,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -76,6 +77,75 @@ def _as_float(x) -> float | None:
     return None
 
 
+def _as_positive_float(x) -> float | None:
+    value = _as_float(x)
+    return value if value is not None and value > 0.0 else None
+
+
+@lru_cache(maxsize=8)
+def _qnominal_tables(path_key: str = "") -> tuple[dict[str, float], dict[str, float]]:
+    """Installed Qnom by well plus field-typical medians from WellsArtificialLiftBig."""
+    try:
+        from analysis.data.equipment_big import load_equipment_big
+        df = load_equipment_big(Path(path_key) if path_key else None)
+    except Exception:
+        return {}, {}
+    if df.empty or "well_key" not in df.columns or "q_nom_m3d" not in df.columns:
+        return {}, {}
+
+    focus = df.copy()
+    if "is_esp" in focus.columns:
+        focus = focus[focus["is_esp"].fillna(False)].copy()
+    focus["well_norm"] = focus["well_key"].map(norm_well)
+    focus["q_nom_m3d"] = pd.to_numeric(focus["q_nom_m3d"], errors="coerce")
+    focus = focus[focus["well_norm"].notna() & (focus["q_nom_m3d"] > 0)].copy()
+    if focus.empty:
+        return {}, {}
+
+    by_well: dict[str, float] = {}
+    if "install_date" in focus.columns:
+        focus = focus.sort_values(["well_norm", "install_date"], na_position="last")
+    for well, grp in focus.groupby("well_norm"):
+        vals = grp["q_nom_m3d"].dropna()
+        if not vals.empty:
+            by_well[str(well)] = float(vals.iloc[-1])
+
+    focus["model_field"] = focus["well_norm"].map(map_model_field_from_well)
+    by_field = {
+        str(field): float(grp["q_nom_m3d"].median())
+        for field, grp in focus.dropna(subset=["model_field"]).groupby("model_field")
+        if grp["q_nom_m3d"].notna().any()
+    }
+    return by_well, by_field
+
+
+def field_typical_qnominal_map(equipment_big_path: Path | None = None) -> dict[str, float]:
+    """Median installed Qnom by model field, used for planned/new wells."""
+    _, by_field = _qnominal_tables(str(equipment_big_path) if equipment_big_path else "")
+    return dict(by_field)
+
+
+def resolve_qnominal(
+    code: str,
+    model_field: str | None = None,
+    equipment_big_path: Path | None = None,
+) -> float | None:
+    """Resolve raw Kpod denominator Qnominal for a well.
+
+    Existing wells use installed ``q_nom_m3d`` from Big.  New/planned wells use the
+    field-typical median so planned high-rate wells can still fire the overload side
+    instead of self-neutralizing via a back-calculated nominal.
+    """
+    by_well, by_field = _qnominal_tables(str(equipment_big_path) if equipment_big_path else "")
+    norm = norm_well(code) or str(code)
+    exact = _as_positive_float(by_well.get(norm))
+    if exact is not None:
+        return exact
+    field = str(model_field or map_model_field_from_well(norm) or "")
+    typical = _as_positive_float(by_field.get(field))
+    return typical
+
+
 def _as_datetime(x) -> datetime | None:
     return x if isinstance(x, datetime) else None
 
@@ -138,11 +208,17 @@ class PlanData:
     months: list[str]
     fwd_months: list[str]
     oil_volume: pd.DataFrame
+    oil_volume_m3: pd.DataFrame
     liquid_volume: pd.DataFrame
+    gas_volume: pd.DataFrame
+    produced_water_volume: pd.DataFrame
+    produced_water_rate: pd.DataFrame
     op_days: pd.DataFrame
     op_days_raw: pd.DataFrame
     registry_oil_rate: pd.DataFrame
+    registry_oil_m3_rate: pd.DataFrame
     registry_liquid_rate: pd.DataFrame
+    registry_water_rate: pd.DataFrame
     cal_days: pd.Series
     producer_meta: pd.DataFrame
     producers: list[str]
@@ -218,7 +294,10 @@ def _read_plan_sheet(
     rate_mode: bool,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, dict]]:
     oil_records: list[tuple] = []
+    oil_m3_records: list[tuple] = []
     liq_records: list[tuple] = []
+    water_records: list[tuple] = []
+    gas_records: list[tuple] = []
     op_records: list[tuple] = []
     meta: dict[str, dict] = {}
     for row in ws.iter_rows(min_row=4, values_only=True):
@@ -243,18 +322,56 @@ def _read_plan_sheet(
         is_rate = "/сут" in unit
         if indicator == "Добыча нефти" and is_rate == rate_mode:
             oil_records.append((code, *values))
+        elif indicator == "Добыча нефти м3" and is_rate == rate_mode:
+            oil_m3_records.append((code, *values))
         elif indicator == "Добыча жидкости" and is_rate == rate_mode:
             liq_records.append((code, *values))
+        elif _is_produced_water_indicator(indicator) and is_rate == rate_mode:
+            water_records.append((code, *values))
+        elif _is_associated_gas_indicator(indicator) and is_rate == rate_mode:
+            # Stored in тыс. м3; scaled to м3 so it shares units with ``qgas``.
+            gas_records.append((code, *[v * 1000.0 for v in values]))
         elif indicator == "Отработанное время" and not rate_mode:
             op_records.append((code, *values))
     return (
         {
             "oil": _frame_from_records(oil_records, months),
+            "oil_m3": _frame_from_records(oil_m3_records, months),
             "liq": _frame_from_records(liq_records, months),
+            "water": _frame_from_records(water_records, months),
+            "gas": _frame_from_records(gas_records, months),
             "op": _frame_from_records(op_records, months),
         },
         meta,
     )
+
+
+def _is_associated_gas_indicator(indicator: str) -> bool:
+    """True only for associated (попутный) gas produced through the well.
+
+    Three lookalikes must not match.  ``ППД_газ`` / ``ППД_газ (Сайклинг)`` are injection.
+    ``Добыча_ПГ`` is natural gas from gas wells, a different stream.  ``Добыча C2..C5+``
+    are separated fractions already counted inside ПНГ.
+    """
+    text = str(indicator or "").strip().casefold()
+    if not text or "ппд" in text:
+        return False
+    return text == "добыча пнг"
+
+
+def _is_produced_water_indicator(indicator: str) -> bool:
+    """True for produced-water rows, false for pressure-maintenance water.
+
+    The plan contains ``Добыча воды (ППД)`` / ``ППД_вода`` rows.  Those are water
+    injection / pressure-maintenance volumes, not water produced through the ESP,
+    so they must not feed produced-water audit columns.
+    """
+    text = str(indicator or "").strip().casefold()
+    if not text:
+        return False
+    if "ппд" in text:
+        return False
+    return "попутной воды" in text or text == "добыча воды"
 
 
 def _align_frame(df: pd.DataFrame, index: pd.Index, months: list[str]) -> pd.DataFrame:
@@ -286,10 +403,15 @@ def load_plan(
         name="wid",
     )
     oil_volume = _align_frame(summary_frames["oil"], all_index, months)
+    oil_volume_m3 = _align_frame(summary_frames["oil_m3"], all_index, months)
     liquid_volume = _align_frame(summary_frames["liq"], all_index, months)
+    gas_volume = _align_frame(summary_frames["gas"], all_index, months)
+    direct_water_volume = _align_frame(summary_frames["water"], all_index, months)
     op_days_raw = _align_frame(summary_frames["op"], all_index, months)
     registry_oil_rate = _align_frame(registry_frames["oil"], all_index, months)
+    registry_oil_m3_rate = _align_frame(registry_frames["oil_m3"], all_index, months)
     registry_liquid_rate = _align_frame(registry_frames["liq"], all_index, months)
+    registry_water_rate = _align_frame(registry_frames["water"], all_index, months)
 
     cal_days = pd.Series(
         {month: float(pd.Period(month, freq="M").days_in_month) for month in months},
@@ -306,6 +428,16 @@ def load_plan(
         index=all_index,
         columns=months,
     )
+    derived_water_volume = (liquid_volume - oil_volume_m3).where(oil_volume_m3 > 0.0, 0.0).clip(lower=0.0)
+    produced_water_volume = direct_water_volume.where(direct_water_volume > 0.0, derived_water_volume)
+    derived_water_rate = np.divide(
+        produced_water_volume.to_numpy(dtype=float),
+        op_days.to_numpy(dtype=float),
+        out=np.zeros_like(produced_water_volume.to_numpy(dtype=float), dtype=float),
+        where=op_days.to_numpy(dtype=float) > 0.0,
+    )
+    produced_water_rate = pd.DataFrame(derived_water_rate, index=all_index, columns=months)
+    produced_water_rate = registry_water_rate.where(registry_water_rate > 0.0, produced_water_rate)
 
     anomaly_rows: list[dict] = []
     for wid in all_index:
@@ -362,6 +494,8 @@ def load_plan(
                 "wid": wid,
                 "planned_oil_t": oil_total,
                 "planned_liquid_m3": liq_total,
+                "planned_produced_water_m3": float(produced_water_volume.loc[wid, fwd_months].sum()) if fwd_months else 0.0,
+                "produced_water_positive_months": int((produced_water_rate.loc[wid, fwd_months] > 0).sum()) if fwd_months else 0,
                 "first_active_month": first_active,
                 "summary_positive_months": int(summary_pos.sum()) if fwd_months else 0,
                 "registry_oil_positive_months": int(reg_oil_pos.sum()) if fwd_months else 0,
@@ -376,16 +510,57 @@ def load_plan(
         months=months,
         fwd_months=fwd_months,
         oil_volume=oil_volume,
+        oil_volume_m3=oil_volume_m3,
         liquid_volume=liquid_volume,
+        gas_volume=gas_volume,
+        produced_water_volume=produced_water_volume,
+        produced_water_rate=produced_water_rate,
         op_days=op_days,
         op_days_raw=op_days_raw,
         registry_oil_rate=registry_oil_rate,
+        registry_oil_m3_rate=registry_oil_m3_rate,
         registry_liquid_rate=registry_liquid_rate,
+        registry_water_rate=registry_water_rate,
         cal_days=cal_days,
         producer_meta=producer_meta,
         producers=sorted(producers),
         anomalies=pd.DataFrame(anomaly_rows),
     )
+
+
+@lru_cache(maxsize=4)
+def _well_deposit_pairs(master_path_key: str = "") -> tuple[tuple[str, str, str], ...]:
+    master_path = Path(master_path_key) if master_path_key else resolve_pp_master_path()
+    wb = openpyxl.load_workbook(master_path, read_only=True, data_only=True)
+    ws = wb["Сводные данные"]
+    header = _header_map(ws, 3)
+    c_dep = _find_col(header, ["Месторождение"])
+    c_un = _find_col(header, ["УН"])
+    c_well = _find_col(header, ["Well_ID*", "Well_ID"])
+    seen: dict[str, tuple[str, str]] = {}
+    for row in ws.iter_rows(min_row=4, values_only=True):
+        code = norm_well(row[c_well]) if c_well < len(row) else None
+        if not code or code in seen:
+            continue
+        seen[code] = (str(row[c_dep] or "").strip(), str(row[c_un] or "").strip())
+    wb.close()
+    return tuple((code, dep, un) for code, (dep, un) in seen.items())
+
+
+def well_deposit_map(master_path: Path | None = None) -> dict[str, str]:
+    """Well code -> «Месторождение», the deposit the well actually produces from.
+
+    The well-code prefix is the УН (operating unit), not the deposit: Верхнетирский
+    УН wells sit on both Большетирское and Ичёдинское.  Свод's own «Месторождение»
+    column carries one value per prefix, so the ПП plan is the only source that
+    resolves the two apart.
+    """
+    return {code: dep for code, dep, _ in _well_deposit_pairs(str(master_path or ""))}
+
+
+def well_un_map(master_path: Path | None = None) -> dict[str, str]:
+    """Well code -> «УН». Matches the code prefix; kept explicit for hazard tests."""
+    return {code: un for code, _, un in _well_deposit_pairs(str(master_path or ""))}
 
 
 def load_gtm(path: Path | None = None) -> pd.DataFrame:
@@ -528,7 +703,10 @@ def load_esp_source(
     c_age = _find_col(header, ["Наработка (сут)"])
     c_demo = _find_col(header, ["Дата демонтажа"])
     c_sour = _find_col(header, ["Кислый/Некислый"])
-    c_ff = _find_col(header, ["Failure Flag", "Признак отказа"])
+    # «Признак отказа» is NOT a fallback: in the reworked Свод it is a text
+    # sub-classification (Преждевременный/Многосуточный/…), and matching it would
+    # silently yield failure_flag=None on every row.
+    c_ff = _find_col(header, ["Флаг отказа", "Failure Flag"])
     c_glf = _find_col(header, ["ГЖФ", "Газовый фактор"])
     c_load = _find_col(header, ["Загр, Двиг,"])
     c_curve = _find_col(header, ["Работа в кривизне"])
@@ -556,10 +734,16 @@ def load_esp_source(
             curvature=_as_float(row[c_curve]),
         )
         runs_by_well[code].append(run)
-        for dt in (run.stop, run.demo):
-            if dt is not None:
-                cutoff_dates.append(dt)
+        # Cutoff = latest event the workbook knows about.  Prefer the stop date; the
+        # demo date only stands in when the stop is missing — demo typos otherwise
+        # poison the cutoff (seen: демонтаж 2026-11 against остановка 2026-04).
+        if run.stop is not None:
+            cutoff_dates.append(run.stop)
+        elif run.demo is not None:
+            cutoff_dates.append(run.demo)
     wb.close()
+
+    source_cutoff = max(cutoff_dates) if cutoff_dates else None
 
     states_by_well: dict[str, EspState] = {}
     for code, runs in runs_by_well.items():
@@ -575,6 +759,16 @@ def load_esp_source(
         if missing_keys:
             cov.update(missing_keys)
             cov_source = "bundle+fallback" if cov_source == "bundle" else "fallback"
+        # The reworked Свод marks the running pump by an EMPTY stop date; the flag no
+        # longer identifies it (0 is shared by open rows and closed ГТМ/ППР pulls).
+        is_active = last.stop is None and last.demo is None
+        age_op = last.age_op
+        if is_active and age_op is None and last.mount is not None:
+            # Open rows carry no «Наработка (сут)» — the running pump's age is the
+            # calendar age at the techregime snapshot the Свод was built from
+            # (same convention as esp_population.load_svod_runs).
+            snapshot = datetime.combine(C.SVOD_OPEN_ASOF, datetime.min.time())
+            age_op = float(max((snapshot - last.mount).days, 0))
         states_by_well[code] = EspState(
             well_code=code,
             field=last.field_raw,
@@ -584,14 +778,12 @@ def load_esp_source(
             mount=last.mount,
             stop=last.stop,
             demo=last.demo,
-            age_op=last.age_op,
+            age_op=age_op,
             failure_flag=last.failure_flag,
-            is_active=last.failure_flag == 0,
+            is_active=is_active,
             covariates=cov,
             cov_source=cov_source,
         )
-
-    source_cutoff = max(cutoff_dates) if cutoff_dates else None
     return EspSource(
         workbook_path=workbook_path,
         source_cutoff=source_cutoff,

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -157,6 +158,16 @@ def _norm_text(v: object) -> str | None:
         return None
     s = re.sub(r"\s+", " ", str(v)).strip()
     return s or None
+
+
+def normalize_well_key(value: object) -> str | None:
+    """Normalize well identifiers without depending on the non-packaged scripts tree."""
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text.casefold()
 
 
 def norm_corrosion_class(v: object) -> float | None:
@@ -339,11 +350,10 @@ def _find_column(hmap: dict[int, tuple[str, str | None]], section: str, param: s
     return None
 
 
-def load_equipment_big(path: Path | None = None) -> pd.DataFrame:
-    """Load and normalize the workbook. One row per спуск, selected columns only."""
-    from scripts.data_utils import normalize_well_key  # local import: scripts dep
-
-    src = Path(path) if path is not None else resolve_equipment_big_path()
+@lru_cache(maxsize=4)
+def _load_equipment_big_cached(src_str: str) -> pd.DataFrame:
+    """Cached workbook read+normalize, keyed by resolved path (see load_equipment_big)."""
+    src = Path(src_str)
     raw = pd.read_excel(src, header=None)
     hmap = _header_map(raw.iloc[:2])
     body = raw.iloc[2:].reset_index(drop=True)
@@ -415,6 +425,18 @@ def load_equipment_big(path: Path | None = None) -> pd.DataFrame:
 
     df["row_id"] = df.index.astype(int)
     return df
+
+
+def load_equipment_big(path: Path | None = None) -> pd.DataFrame:
+    """Load and normalize the workbook. One row per спуск, selected columns only.
+
+    The expensive ``pd.read_excel`` is cached per resolved path — several independent
+    consumers (Kpod Qnom, Big history intervals, fleet size) load it in one run, and it
+    was previously re-read each time.  A fresh copy is returned so callers can mutate
+    safely without corrupting the shared cache.
+    """
+    src = Path(path) if path is not None else resolve_equipment_big_path()
+    return _load_equipment_big_cached(str(src)).copy()
 
 
 __all__ = [
