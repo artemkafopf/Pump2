@@ -432,18 +432,75 @@ def add_dynamic_salt_proxies(
     return working
 
 
+#: ``col_0001`` (Месторождение) → код месторождения в справочнике плотностей.
+#:
+#: ⚠⚠ Справочник ведётся КОДАМИ (``Bt_Vt``), а телеметрия — полными названиями
+#: («Большетирское НМ» / «Верхнетирский участок»). Без этого перевода каскад
+#: ``DensityLookup.get`` вытягивал только те строки, где префикс ключа скважины
+#: СЛУЧАЙНО совпадал с кодом месторождения (``ya``→``Ya``, ``da``→``Da``): плотность
+#: находилась у 609 скважин из 1158, и дыра приходилась ровно на Vt (276 скважин),
+#: Az (96), Au (98) и Ki (16). В витрине это давало ρ на 66.5 % строк и ГЖФ на 76.0 %
+#: вместо 93.9 % и 82.1 %, причём у Большетирского плотность стояла на 8 % строк,
+#: у Западно-Аянского — на 0 %.
+#:
+#: ⚠⚠ Шесть пар, выглядевших «отсутствующими в справочнике» (Ya/Az, Ic/Vt, Bt/Vt,
+#: Za/Au, Ya/Au, Ya/Ki — 206 401 строка), в нём ЕСТЬ. Запрашивать их у заказчика не
+#: нужно; запрашивать нужно Tk/Zy, где справочные 0.816 расходятся с наблюдёнными
+#: 0.864 на 5.9 % — это расхождение величины, а не ключа.
+FIELD_CODE = {
+    "Ярактинское НГКМ": "Ya",
+    "Большетирское НМ": "Bt",
+    "Ичёдинское НМ": "Ic",
+    "Маччобинское НГКМ": "Mc",
+    "Западно-Аянское НГКМ": "Za",
+    "Даниловское НГКМ": "Da",
+    "Марковское НГКМ": "Ma",
+    "Месторождение им. Н.В.Мышевского": "Msh",
+    "Токминское НГКМ": "Tk",
+    "Нелбинское НГКМ": "Nlt",
+    "Бариктинское НГКМ": "Br",
+    "Бурское НМ": "Bur",
+    "Без месторождения": "Без месторождения",
+}
+
+#: ``col_0002`` (ЛУ) → код лицензионного участка в справочнике плотностей.
+LU_CODE = {
+    "Ярактинский участок": "Ya",
+    "Верхнетирский участок": "Vt",
+    "Западно-Ярактинский участок": "Zy",
+    "Мирнинский участок": "Mr",
+    "Аянский (Западный) участок": "Az",
+    "Аянский участок": "Au",
+    "Большетирский участок": "Bt",
+    "Даниловский участок": "Da",
+    "Марковский участок": "Ma",
+    "Кийский участок": "Ki",
+}
+
+
 @lru_cache(maxsize=1)
 def load_well_licence_map() -> pd.DataFrame:
-    """``well_key -> (месторождение, код ЛУ)`` из сырого слоя телеметрии.
+    """``well_key -> (месторождение, ЛУ)`` из сырого слоя телеметрии, кодами справочника.
 
-    ⚠ Код ЛУ берётся из ИМЕНИ ФАЙЛА выгрузки: телеметрия выгружается по одному файлу
-    на лицензионный участок (``Выгрузка телеметрии Vt 20260815.xlsx``), и это самый
-    прямой носитель принадлежности. Длинное название участка («Верхнетирский
-    участок») в справочнике плотностей не встречается, а код — встречается.
+    Отдаёт и коды (``field`` / ``lu`` — ключ в справочник плотностей), и исходные
+    полные названия (``field_name`` / ``lu_name``), чтобы читаемое имя не терялось.
+
+    ⚠⚠ Принадлежность участку берётся из КОЛОНКИ ``col_0002``, а не из имени файла
+    выгрузки. Имя файла — это то, как выгрузку назвали, а не сами данные: смена
+    соглашения об именовании даёт ``NaN`` в ``lu`` → ``NaN`` в плотности → тихую
+    потерю газовой оси, без единого исключения по дороге. Тот же класс ошибки, что
+    позиционный ``run`` вместо ключа ``(скважина, монтаж)``. Имя файла оставлено
+    ВТОРЫМ МНЕНИЕМ: расхождение печатается в лог, но ключом не служит.
 
     ⚠⚠ Соответствие НЕ выводится из отношения ГФ/ГЖФ. Отношение служит контролем
     стыковки (``analysis.data.oil_density.validate_against_observed``), и выводить из
     него же ключ означало бы проверять величину ею самой.
+
+    ⚠ Ключ — ПАРА, не месторождение: у ``Bt`` плотность различается по участкам
+    (``Bt_Vt`` 0.811 против ``Bt_Bt`` 0.821), у ``Ya`` — тоже (0.829 / 0.833).
+
+    Незнакомое название падает с ошибкой: молчаливый ``NaN`` здесь хуже остановки —
+    колонка просто окажется пустой, а слой на ней «не подтвердится».
     """
     import sqlite3
 
@@ -457,14 +514,43 @@ def load_well_licence_map() -> pd.DataFrame:
         if missing:
             raise KeyError(f"telemetry_column_map: нет колонок {sorted(missing)}")
         raw = pd.read_sql_query(
-            f'SELECT DISTINCT _meta_normalized_well well_key, {columns["Месторождение"]} field, '
+            f'SELECT DISTINCT _meta_normalized_well well_key, {columns["Месторождение"]} field_name, '
             f'{columns["ЛУ"]} lu_name, _meta_source_file source_file FROM telemetry_raw',
             connection,
         )
 
-    raw["lu"] = raw["source_file"].astype("string").str.extract(r"телеметрии\s+([A-Za-zА-Яа-яЁё]+)\s", expand=False)
     raw = raw.dropna(subset=["well_key"]).drop_duplicates(subset=["well_key"], keep="first")
-    return raw[["well_key", "field", "lu_name", "lu"]].reset_index(drop=True)
+    for column in ("field_name", "lu_name"):
+        raw[column] = raw[column].astype("string").str.strip()
+
+    unknown_fields = sorted(set(raw["field_name"].dropna()) - set(FIELD_CODE))
+    unknown_lus = sorted(set(raw["lu_name"].dropna()) - set(LU_CODE))
+    if unknown_fields or unknown_lus:
+        raise KeyError(
+            "load_well_licence_map: незнакомые названия в телеметрии — "
+            f"месторождения {unknown_fields}, участки {unknown_lus}. "
+            "Добавьте их в FIELD_CODE/LU_CODE вместе с кодом справочника плотностей; "
+            "оставлять их без кода нельзя — плотность молча станет пустой."
+        )
+
+    raw["field"] = raw["field_name"].map(FIELD_CODE)
+    raw["lu"] = raw["lu_name"].map(LU_CODE)
+
+    # ⚠ Имя файла — второе мнение, не источник. Телеметрия выгружается по одному файлу
+    # на участок, поэтому расхождение с ``col_0002`` означает, что выгрузку собрали
+    # иначе, чем раньше, и это стоит увидеть — но ключ всё равно берётся из колонки.
+    from_file = raw["source_file"].astype("string").str.extract(
+        r"телеметрии\s+([A-Za-zА-Яа-яЁё]+)\s", expand=False
+    )
+    disagreement = raw["lu"].notna() & from_file.notna() & (raw["lu"] != from_file)
+    if disagreement.any():
+        pairs = sorted(set(zip(raw.loc[disagreement, "lu"], from_file[disagreement])))
+        print(
+            f"[load_well_licence_map] ⚠ имя файла расходится с колонкой ЛУ у "
+            f"{int(disagreement.sum())} скважин: {pairs[:6]} — ключом взята колонка"
+        )
+
+    return raw[["well_key", "field", "field_name", "lu", "lu_name"]].reset_index(drop=True)
 
 
 #: Приоритет источников при слиянии. ⚠⚠ «Телеметрия первая» принято ПО УМОЛЧАНИЮ,
@@ -587,7 +673,10 @@ def _attach_gas_axes(daily: pd.DataFrame) -> pd.DataFrame:
 
     licences = load_well_licence_map()
     result["well_key"] = result["well_id"].map(normalize_well_key)
-    result = result.merge(licences[["well_key", "field", "lu"]], on="well_key", how="left")
+    # ⚠ ``field``/``lu`` — КОДЫ справочника, читаемые названия едут рядом отдельно.
+    result = result.merge(
+        licences[["well_key", "field", "field_name", "lu", "lu_name"]], on="well_key", how="left"
+    )
     result = attach_density(result, field_col="field", lu_col="lu", well_col="well_id",
                             out_col=OIL_DENSITY_COLUMN)
 

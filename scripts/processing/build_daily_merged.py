@@ -31,6 +31,10 @@ from scripts.db import StepTimer, get_warehouse_conn, upsert_df, log_quality_fla
 
 _CHUNK_SIZE = 200  # wells per pipeline chunk (smaller than 400 to keep memory reasonable)
 
+#: Витрина собирается здесь и подменяет боевую таблицу одной транзакцией — см.
+#: развёрнутую оговорку в :func:`run`. Читатель никогда не видит недособранное.
+_STAGING_TABLE = "proc__daily_merged__staging"
+
 
 def run(conn=None) -> None:
     close = conn is None
@@ -46,8 +50,17 @@ def run(conn=None) -> None:
         print(f"[build_daily_merged] Processing {len(all_wells)} wells in chunks of {_CHUNK_SIZE}...")
 
         with StepTimer("proc__daily_merged", conn) as timer:
-            # Drop and recreate so we get a clean table + index.
-            conn.execute("DROP TABLE IF EXISTS proc__daily_merged")
+            # ⚠⚠ Собираем в СТОРОНЕ и подменяем одной транзакцией. Раньше здесь стоял
+            # `DROP TABLE proc__daily_merged` с последующей дозаписью чанками в
+            # АЛФАВИТНОМ порядке скважин (см. `sorted(all_wells)` выше): пока сборка
+            # шла, таблица существовала и читалась, но содержала только начало
+            # алфавита. Читатель получал кадр в 725 пусков вместо 2306, без Ya и Vt
+            # вовсе — и без единого признака поломки: ни исключения, ни пустых
+            # колонок, 99.9 % заполненность, правдоподобные распределения. Такой
+            # обрезок неотличим от «модель на новых данных поехала».
+            # База в WAL, поэтому до COMMIT читатель видит целую СТАРУЮ витрину,
+            # после — целую НОВУЮ, а промежуточного состояния не существует.
+            conn.execute(f"DROP TABLE IF EXISTS {_STAGING_TABLE}")
             conn.commit()
 
             total_rows = 0
@@ -71,10 +84,12 @@ def run(conn=None) -> None:
                 # ⚠ Обе газовые оси, плотность и её ключ — ЯВНЫМИ колонками: выбор
                 # базы принимает модель по кросс-проверке, данные обязаны дать
                 # возможность выбрать, а не решить за неё.
+                # ``field``/``lu`` — КОДЫ справочника плотностей (``Bt``/``Vt``),
+                # ``field_name``/``lu_name`` — полные названия из телеметрии.
                 gas_axes = [
                     GAS_FACTOR_COLUMN, f"{GAS_FACTOR_COLUMN}{SOURCE_SUFFIX}",
                     f"{GAS_LIQUID_RATIO_COLUMN}{SOURCE_SUFFIX}",
-                    OIL_DENSITY_COLUMN, "field", "lu",
+                    OIL_DENSITY_COLUMN, "field", "lu", "field_name", "lu_name",
                 ]
                 # dict.fromkeys дедуплицирует: `gas_liquid_ratio_m3m3_src` попадает и
                 # в общий провенанс, и в газовый блок.
@@ -85,7 +100,7 @@ def run(conn=None) -> None:
                 chunk_df = chunk_df[[c for c in cols if c in chunk_df.columns]]
 
                 if_exists = "replace" if first_chunk else "append"
-                upsert_df(chunk_df, "proc__daily_merged", conn, if_exists=if_exists)
+                upsert_df(chunk_df, _STAGING_TABLE, conn, if_exists=if_exists)
                 total_rows += len(chunk_df)
                 first_chunk = False
                 print(f"  wells {start}–{start + len(chunk_wells) - 1}: {len(chunk_df):,} rows (total so far: {total_rows:,})")
@@ -96,15 +111,42 @@ def run(conn=None) -> None:
             # постфактум нельзя.
             report = pd.read_sql(
                 "SELECT " + ", ".join(f"{c}{SOURCE_SUFFIX}" for c in CANONICAL_COLUMNS)
-                + " FROM proc__daily_merged",
+                + f" FROM {_STAGING_TABLE}",
                 conn,
             )
             print("\n[build_daily_merged] Провенанс по колонкам:")
             print(column_provenance_report(report).to_string(index=False))
 
-            # Create index after full load for performance.
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_proc_daily_merged_key_dt ON proc__daily_merged (well_key, dt)")
+            # ⚠⚠ Плотность — В ЛОГЕ СБОРКИ. Пропуск ρ означает пропуск пересчёта
+            # ГФ→ГЖФ, то есть тихую потерю газовой оси на целых стратах; постфактум
+            # это читается как «слой не подтвердился», а не как «данных нет».
+            density = pd.read_sql(
+                f"SELECT field, lu, {OIL_DENSITY_COLUMN} rho FROM {_STAGING_TABLE}", conn
+            )
+            filled = density["rho"].notna()
+            print(
+                f"[build_daily_merged] Плотность: {filled.sum():,} из {len(density):,} строк "
+                f"({filled.mean():.1%}), пар (месторождение, ЛУ) "
+                f"{density.loc[filled, ['field', 'lu']].drop_duplicates().shape[0]} из "
+                f"{density[['field', 'lu']].drop_duplicates().shape[0]}"
+            )
+            if not filled.all():
+                gaps = (density.loc[~filled, ["field", "lu"]].value_counts().head(10))
+                print("  ⚠ без плотности:")
+                print("   " + gaps.to_string().replace("\n", "\n   "))
+
+            # Подмена одной транзакцией: индекс строится уже на подменённой таблице,
+            # внутри той же транзакции, поэтому «таблица без индекса» читателю тоже
+            # не видна. commit() до BEGIN закрывает неявную транзакцию sqlite3.
             conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DROP TABLE IF EXISTS proc__daily_merged")
+            conn.execute(f"ALTER TABLE {_STAGING_TABLE} RENAME TO proc__daily_merged")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_proc_daily_merged_key_dt "
+                "ON proc__daily_merged (well_key, dt)"
+            )
+            conn.execute("COMMIT")
             timer.row_count = total_rows
 
             # Quality check: flag wells with zero rows.
