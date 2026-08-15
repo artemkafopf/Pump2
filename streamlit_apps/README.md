@@ -43,6 +43,30 @@ To run the Vt short-mode interaction surface explorer:
 streamlit run streamlit_apps/vt_mode_interaction_surface.py
 ```
 
+To run the **TTF viewer** — the covariate-binning explorer for the Свод fact panel — pick the x-axis (frequency,
+Ql, **Qном** — a discrete axis, one bin per nameplate size with no n-target build and the
+marker on the value, Kпод, GLF, water cut, Pзаб, Pзаб/Pнас), movable / mergeable / splittable bins,
+mean vs median vs geometric mean with a fitted trend, optional removal of a fitted model's
+hazard layers as an AFT time-scale offset, and the censoring-aware KM+RMST panel.  The layer
+models are **Пофондовая v5** — one θ_Qном per field (Ya, Vt sour/non-sour, Az, Ic, Au, Mc,
+with any unmodelled field falling back to the pooled `Fleet` fit), read from the same two
+deploy blocks the calculators are wired from — plus the older single-field Ya v2 / v2.1 / Vt v4.
+v5 is the only one offered on «Весь фонд»: every field's θ_Qном is pinned at the same Qном 250,
+so a mixed panel is rescaled toward one reference pump instead of several.  The population is any field clearing the failure threshold, the whole fleet,
+or the Vt sour / non-sour halves (the v3.2 well-level H₂S class — the strata the Vt models are
+fitted on).  A tick next to either chart rescales it to **multiples of a reference bin**
+(`Y(ref) = 1`, reference X set in the field beside the tick, median of the covariate by
+default), which is how two panels on different levels are compared by shape.  «Отказов в
+панели» is a **filtered** count, so «Откуда это число» under the metrics unfolds the whole
+selection funnel — sheet rows → resolved outcome → field → closed run with a rate → Мирнинский
+cohort → genuine failure → axis coverage and bounds — with what each step dropped.  On Ya that
+is 1541 sheet rows down to 630 on the frequency axis, and the largest single cut is the
+genuine-failure rule, not any coverage limit:
+
+```bash
+streamlit run streamlit_apps/ttf_viewer.py
+```
+
 The Bayesian app supports both:
 
 - fixed `K` fitting;
@@ -90,6 +114,13 @@ For the Vt short-mode interaction surface explorer:
 ```bash
 .\scripts\setup_streamlit.ps1
 .\scripts\run_vt_mode_interaction_surface_streamlit.ps1
+```
+
+For the frequency-binning explorer:
+
+```bash
+.\scripts\setup_streamlit.ps1
+.\scripts\run_ttf_viewer.ps1
 ```
 
 If you prefer not to use the helper script:
