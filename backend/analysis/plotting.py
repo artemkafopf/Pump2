@@ -1,2 +1,6 @@
 """Backward-compat shim — use analysis.common.plotting directly."""
 from analysis.common.plotting import *  # noqa: F401, F403
+from analysis.common.plotting import (  # noqa: F401
+    _empirical_bin_frame,
+    _factual_histogram_frame,
+)

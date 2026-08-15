@@ -3,7 +3,7 @@
 Constraints enforced by reparameterization:
   - β₁ > 0, ≤ 8  (free upper-bounded; no β₁ < 1 requirement)
   - β₂ > max(1, β₁)  (hard; β₂ = max(1, β₁) + exp(φ₂_excess) — prevents label swap)
-  - η₂ ≥ min_eta_ratio · η₁  (hard; η₂ = η₁ · (min_ratio + softplus(φ_gap)))
+  - η₂ ≥ min_eta_ratio · η₁  (hard FLOOR, no ceiling; η₂ = η₁ · (min_ratio + exp(φ_gap)))
   - w₁: soft only — flagged in message if > degenerate_w1_threshold
 
 Returns LatentWeibullCurveFitResult for drop-in compatibility with Phase 3–6.
@@ -33,7 +33,16 @@ DEFAULT_DEGENERATE_W1: float = 0.75
 _LOG_BETA1_BOUNDS = (np.log(0.05), np.log(8.0))      # β₁ ∈ [0.05, 8]
 _LOG_ETA1_BOUNDS = (np.log(0.5), np.log(50_000.0))   # η₁ ∈ [0.5, 50 000]
 _LOG_B2_EXCESS_BOUNDS = (np.log(0.01), np.log(50.0)) # β₂_excess = β₂ − max(1, β₁) ∈ [0.01, 50]
-_ETA_GAP_BOUNDS = (-12.0, 12.0)                       # softplus input for η-gap
+# log(η₂/η₁ − min_ratio).  η₂ = η₁·(min_ratio + exp(p)), so the floor η₂ ≥ min_ratio·η₁
+# holds for every p while the ratio can reach min_ratio + 1e4 — effectively no ceiling.
+#
+# This was `(-12, 12)` fed through a softplus, which capped the ratio at
+# 2 + softplus(12) = 14.0 exactly — an ACCIDENTAL CEILING that bound 4 of 9 strata
+# (Da/Ic/Mc/Other), fixing their η₂, B50 and whole tail to a bound rather than the data.
+# Only a floor was ever intended.  The softplus was also inconsistent with its own
+# initialiser and starts, which both work in exp space (`log(sp_val)` inverts exp, not
+# softplus), so a warm start at ratio 14 came back as 4.6.
+_LOG_ETA_GAP_BOUNDS = (float(np.log(1e-4)), float(np.log(1e4)))
 
 
 # ── Halton low-discrepancy sequence ──────────────────────────────────────────
@@ -179,10 +188,11 @@ def _m_step(
         p0_parts.append(float(np.clip(np.log(b2_excess_init), *_LOG_B2_EXCESS_BOUNDS)))
         bounds_parts.append(_LOG_B2_EXCESS_BOUNDS)
 
-    # η-gap: softplus(p) ≈ η₂/η₁ - min_ratio; approximate init via log
-    sp_val = max(eta2_prev / max(eta1_prev, EPSILON) - min_eta_ratio, 0.01)
-    p0_parts.append(float(np.clip(np.log(sp_val), *_ETA_GAP_BOUNDS)))
-    bounds_parts.append(_ETA_GAP_BOUNDS)
+    # η-gap: p = log(η₂/η₁ − min_ratio) — the exact inverse of the exp link below, so a
+    # warm start round-trips (it did not under the old softplus link).
+    gap_val = max(eta2_prev / max(eta1_prev, EPSILON) - min_eta_ratio, 1e-4)
+    p0_parts.append(float(np.clip(np.log(gap_val), *_LOG_ETA_GAP_BOUNDS)))
+    bounds_parts.append(_LOG_ETA_GAP_BOUNDS)
 
     p0 = np.array(p0_parts)
 
@@ -197,7 +207,7 @@ def _m_step(
             b2 = max(1.0, b1) + b2_excess
         else:
             b2 = fix_beta2
-        e2 = e1 * (min_eta_ratio + _softplus(float(params[idx])))
+        e2 = e1 * (min_eta_ratio + float(np.exp(params[idx])))
         ll1 = np.where(fail, _log_weibull_pdf(t, b1, e1), _log_weibull_surv(t, b1, e1))
         ll2 = np.where(fail, _log_weibull_pdf(t, b2, e2), _log_weibull_surv(t, b2, e2))
         total = float(np.dot(r1, ll1) + np.dot(r2, ll2))
@@ -218,7 +228,7 @@ def _m_step(
         b2_new = max(1.0, b1_new) + b2_excess
     else:
         b2_new = fix_beta2
-    e2_new = e1_new * (min_eta_ratio + _softplus(float(res.x[idx])))
+    e2_new = e1_new * (min_eta_ratio + float(np.exp(res.x[idx])))
 
     return b1_new, e1_new, b2_new, e2_new
 
@@ -356,8 +366,9 @@ def fit_latent_weibull_em(
                 # β₂_excess log-uniform over [0.05, 10]; β₂ = max(1, β₁) + excess
                 hb2_excess = float(np.exp(np.log(0.05) + row[3] * (np.log(10.0) - np.log(0.05))))
                 hb2 = max(1.0, hb1) + hb2_excess
-            # η-gap log-uniform over [0.05, 20]
-            hgap = float(np.exp(np.log(0.05) + row[4] * (np.log(20.0) - np.log(0.05))))
+            # η-gap log-uniform over [0.05, 400] — the old [0.05, 20] never proposed a
+            # ratio past ~22, which reinforced the accidental 14.0 ceiling.
+            hgap = float(np.exp(np.log(0.05) + row[4] * (np.log(400.0) - np.log(0.05))))
             he2 = he1 * (min_eta_ratio + hgap)
             starts.append((hw1, hb1, he1, hb2, he2))
 
