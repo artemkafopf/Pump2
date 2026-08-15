@@ -17,7 +17,16 @@ for _p in (str(REPO_ROOT), str(BACKEND_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from scripts.data_utils import CANONICAL_COLUMNS, load_daily_merged, normalize_well_key
+from scripts.data_utils import (
+    CANONICAL_COLUMNS,
+    GAS_FACTOR_COLUMN,
+    GAS_LIQUID_RATIO_COLUMN,
+    OIL_DENSITY_COLUMN,
+    SOURCE_SUFFIX,
+    column_provenance_report,
+    load_daily_merged,
+    normalize_well_key,
+)
 from scripts.db import StepTimer, get_warehouse_conn, upsert_df, log_quality_flag
 
 _CHUNK_SIZE = 200  # wells per pipeline chunk (smaller than 400 to keep memory reasonable)
@@ -53,8 +62,26 @@ def run(conn=None) -> None:
                 chunk_df["well_key"] = chunk_df["well_id"].map(normalize_well_key)
                 chunk_df = chunk_df.drop(columns=["well_id"])
 
-                # Reorder columns.
-                cols = ["well_key", "dt", *CANONICAL_COLUMNS, "source"]
+                # Reorder columns: значение и рядом его провенанс.
+                # ⚠⚠ `row_source` — ПОСТРОЧНАЯ метка («в строке есть что-то от
+                # телеметрии»), а не ответ на «откуда это значение». Ответ дают
+                # колонки `<имя>_src`. `source` оставлен синонимом row_source для
+                # существующих потребителей.
+                provenance = [f"{c}{SOURCE_SUFFIX}" for c in CANONICAL_COLUMNS]
+                # ⚠ Обе газовые оси, плотность и её ключ — ЯВНЫМИ колонками: выбор
+                # базы принимает модель по кросс-проверке, данные обязаны дать
+                # возможность выбрать, а не решить за неё.
+                gas_axes = [
+                    GAS_FACTOR_COLUMN, f"{GAS_FACTOR_COLUMN}{SOURCE_SUFFIX}",
+                    f"{GAS_LIQUID_RATIO_COLUMN}{SOURCE_SUFFIX}",
+                    OIL_DENSITY_COLUMN, "field", "lu",
+                ]
+                # dict.fromkeys дедуплицирует: `gas_liquid_ratio_m3m3_src` попадает и
+                # в общий провенанс, и в газовый блок.
+                cols = list(dict.fromkeys(
+                    ["well_key", "dt", *CANONICAL_COLUMNS, *provenance, *gas_axes,
+                     "row_source", "source"]
+                ))
                 chunk_df = chunk_df[[c for c in cols if c in chunk_df.columns]]
 
                 if_exists = "replace" if first_chunk else "append"
@@ -62,6 +89,18 @@ def run(conn=None) -> None:
                 total_rows += len(chunk_df)
                 first_chunk = False
                 print(f"  wells {start}–{start + len(chunk_wells) - 1}: {len(chunk_df):,} rows (total so far: {total_rows:,})")
+
+            # ⚠⚠ Контроль провенанса В ЛОГЕ СБОРКИ, а не «потом посмотрим по витрине».
+            # Ноль телеметрии у колонки — это либо правда (частоты в телеметрии до
+            # 2025 года нет вовсе), либо сломанный ключ/формат даты, и различить их
+            # постфактум нельзя.
+            report = pd.read_sql(
+                "SELECT " + ", ".join(f"{c}{SOURCE_SUFFIX}" for c in CANONICAL_COLUMNS)
+                + " FROM proc__daily_merged",
+                conn,
+            )
+            print("\n[build_daily_merged] Провенанс по колонкам:")
+            print(column_provenance_report(report).to_string(index=False))
 
             # Create index after full load for performance.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_proc_daily_merged_key_dt ON proc__daily_merged (well_key, dt)")

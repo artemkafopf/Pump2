@@ -21,7 +21,12 @@ from analysis.input_paths import resolve_v03_all_path
 from analysis.sqlite_paths import resolve_techregime_db_path
 from analysis.paths import results_dir
 from scripts.analyze_failure_horizon import load_runs
-from scripts.data_utils import _numeric, load_daily_merged
+from scripts.data_utils import (
+    SOURCE_SUFFIX,
+    SOURCE_TELEMETRY,
+    _numeric,
+    load_daily_merged,
+)
 
 
 _SLUG = "true_ttf"
@@ -79,7 +84,17 @@ def load_techregime_status_daily(wells: list[str]) -> pd.DataFrame:
 
 def telemetry_vs_techregime_candidate_report(wells: list[str]) -> pd.DataFrame:
     daily = load_daily_merged(wells)
-    telemetry = daily.loc[daily["source"].eq("telemetry")].copy()
+    # ⚠⚠ Отбор идёт по провенансу КОНКРЕТНЫХ величин, а не по построчной метке.
+    # `source`/`row_source` значит «в строке есть хоть что-то от телеметрии» — обычно
+    # это дебит; частота при этом сплошь техрежимная (в телеметрии её до 2025 года
+    # ровно 0 %). Отбор по построчной метке давал «99.5 % частоты в telemetry-строках»
+    # при нулевой частоте в самой телеметрии, и кандидаты ниже проверялись на смеси.
+    from_telemetry = pd.Series(False, index=daily.index)
+    for column in ("qliq", "freq", "load"):
+        marker = f"{column}{SOURCE_SUFFIX}"
+        if marker in daily.columns:
+            from_telemetry = from_telemetry | daily[marker].eq(SOURCE_TELEMETRY)
+    telemetry = daily.loc[from_telemetry].copy()
     treg = load_techregime_status_daily(wells)
     merged = telemetry.merge(treg[["well_id", "dt", "treg_in_operation"]], on=["well_id", "dt"], how="inner")
     for column in ["freq", "qliq", "load"]:

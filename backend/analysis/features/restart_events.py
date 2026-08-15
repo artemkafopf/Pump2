@@ -144,8 +144,43 @@ def _load_techregime_operation(well_keys: list[str]) -> pd.DataFrame:
     return g
 
 
-def build_restart_features() -> pd.DataFrame:
-    """Fleet-wide reconciled restart counts, one row per raw__v03_runs run."""
+def _window_first_op_days(frame: pd.DataFrame, n_op_days: int | None) -> pd.DataFrame:
+    """Keep rows up to the first ``n_op_days`` union operating days.
+
+    The regression stack needs restart counts from the early operating window, not
+    the whole run.  We count operating days with the same OR-combined definition
+    used by :func:`reconcile_restarts`; rows before the Nth operating day are kept
+    so a down→up transition into that early window is still visible.
+    """
+    if n_op_days is None or frame.empty:
+        return frame
+    df = frame.sort_values("dt").copy() if "dt" in frame.columns else frame.copy()
+    if "qliq" in df.columns:
+        op_tel = pd.to_numeric(df["qliq"], errors="coerce").gt(0)
+    else:
+        op_tel = pd.Series(False, index=df.index)
+    if "treg_in_operation" in df.columns:
+        op_treg = df["treg_in_operation"].fillna(False).astype(bool)
+    else:
+        op_treg = pd.Series(False, index=df.index)
+    op_union = op_tel | op_treg
+    op_rank = op_union.cumsum()
+    if int(op_rank.max()) <= n_op_days:
+        return df
+    cutoff_pos = int(np.flatnonzero((op_rank >= n_op_days).to_numpy())[0])
+    return df.iloc[: cutoff_pos + 1]
+
+
+def build_restart_features(window_op_days: int | None = None) -> pd.DataFrame:
+    """Fleet-wide reconciled restart counts, one row per raw__v03_runs run.
+
+    Parameters
+    ----------
+    window_op_days:
+        If provided, run-level daily frames are truncated to the first N operating
+        days before restart reconciliation.  ``None`` preserves the historical
+        whole-run behavior.
+    """
     import sqlite3
 
     from analysis.paths import WAREHOUSE_DIR
@@ -180,6 +215,7 @@ def build_restart_features() -> pd.DataFrame:
                 merged = merged.merge(p, on="dt", how="outer")
         else:
             merged = pd.DataFrame(columns=["dt", "qliq", "treg_in_operation"])
+        merged = _window_first_op_days(merged, window_op_days)
         summ = reconcile_restarts(merged)
         summ["row_id"] = int(r.row_id)
         out.append(summ)

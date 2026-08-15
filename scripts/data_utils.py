@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from functools import lru_cache
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -22,6 +24,24 @@ TELEMETRY_DB_PATH = resolve_telemetry_db_path()
 TECHREGIME_DB_PATH = resolve_techregime_db_path()
 LAB_DB_PATH = resolve_lab_db_path()
 
+#: Значения меток провенанса. ``absent`` — не «пусто по недосмотру», а «ни один
+#: источник этого не дал»: без такого явного значения пропуск неотличим от того,
+#: что колонку просто не запросили.
+SOURCE_TELEMETRY = "telemetry"
+SOURCE_TECHREGIME = "techregime"
+SOURCE_ABSENT = "absent"
+#: Суффикс колонки-провенанса: ``freq`` -> ``freq_src``.
+SOURCE_SUFFIX = "_src"
+
+#: ⚠⚠ Единица — В ИМЕНИ, а не в комментарии. Вся история с газом произошла потому,
+#: что две разные величины назывались одинаково: ГФ [м³/т НЕФТИ] из техрежима и ГЖФ
+#: [м³/м³ ЖИДКОСТИ] из телеметрии склеивались в одну колонку ``gas_factor``.
+#: Обе оси теперь существуют ЯВНО и по отдельности; выбор базы — решение модели по
+#: кросс-проверке, данные лишь обязаны дать возможность выбрать.
+GAS_FACTOR_COLUMN = "gas_factor_m3t"          # газ на тонну нефти
+GAS_LIQUID_RATIO_COLUMN = "gas_liquid_ratio_m3m3"   # газ на куб жидкости
+OIL_DENSITY_COLUMN = "oil_density_t_m3"
+
 CANONICAL_COLUMNS = [
     "freq",
     "load",
@@ -30,7 +50,12 @@ CANONICAL_COLUMNS = [
     "rzab",
     "qliq",
     "watercut",
+    # ⚠ Историческое имя. Оставлено синонимом ``gas_factor_m3t``, чтобы не рвать
+    # потребителей, но под ним лежит ГФ на ТОННУ НЕФТИ и ничто иное.
     "gas_factor",
+    # ⚠ ГЖФ — ОТДЕЛЬНАЯ величина, не синоним ГФ. Телеметрия отдаёт её измеренной;
+    # техрежим не даёт вовсе, там она достраивается пересчётом через плотность.
+    "gas_liquid_ratio_m3m3",
     "qgas",
     "kprod",
 ]
@@ -46,18 +71,67 @@ LAB_CHEMISTRY_COLUMNS = [
     "ph",
 ]
 
-TECHREGIME_QUERY_COLUMNS = {
-    "freq": "col_0047",
-    "load": "col_0048",
-    "rpl": "col_0061",
-    "rpump_intake": "col_0062",
-    "rzab": "col_0063",
-    "qliq": "col_0064",
-    "watercut": "col_0065",
-    "gas_factor": "col_0067",
-    "qgas": "col_0068",
-    "kprod": "col_0069",
+#: ⚠⚠ Смысл колонок техрежима лежит НЕ в их именах. В ``techregime_records`` они
+#: называются ``col_0001 … col_0093``, а что под ними — в отдельной таблице
+#: ``techregime_column_map``. Захардкоженный ``col_0067`` МОЛЧА прочитает другую
+#: величину, если следующая выгрузка сдвинет порядок столбцов: запрос не упадёт,
+#: данные просто станут другими.
+#:
+#: Это ровно тот класс ошибки, который уже стоил проекту дорого: позиционный ``run``
+#: вместо ключа ``(скважина, монтаж)`` портил 669 пусков из 2308, модель считалась и
+#: сходилась, а починка дала слоям +99.6.
+#:
+#: Поэтому здесь объявлены ИМЕНА, а номера разрешаются по карте в
+#: :func:`resolve_techregime_columns`. Нет имени в карте — падаем с внятной ошибкой,
+#: а не подставляем NULL.
+TECHREGIME_SOURCE_NAMES = {
+    "freq": "Текущий режим работы скважины | Частота",
+    "load": "Текущий режим работы скважины | Загр. Двиг.",
+    "rpl": "Текущий режим работы скважины | Рпл.",
+    "rpump_intake": "Текущий режим работы скважины | Рпр. насоса",
+    "rzab": "Текущий режим работы скважины | Рзаб",
+    "qliq": "Текущий режим работы скважины | Дебит жидк.",
+    "watercut": "Текущий режим работы скважины | Обводненность",
+    "gas_factor": "Текущий режим работы скважины | Газовый фактор",
+    "qgas": "Текущий режим работы скважины | Дебит газа",
+    "kprod": "Текущий режим работы скважины | Кпрод.",
 }
+
+#: Величины, которых у техрежима нет в принципе. Перечислены явно, чтобы «нет в
+#: карте» осталось ошибкой, а не молчаливым NULL.
+TECHREGIME_ABSENT_COLUMNS = ("gas_liquid_ratio_m3m3",)
+
+
+@lru_cache(maxsize=1)
+def resolve_techregime_columns() -> dict[str, str]:
+    """``alias -> storage_name`` по ``techregime_column_map``, а не по номеру.
+
+    ⚠ Падает, если ожидаемого ``original_name`` в карте нет: молчаливый NULL здесь
+    хуже остановки — колонка просто окажется пустой, а слой на ней «не подтвердится».
+    """
+    with sqlite3.connect(TECHREGIME_DB_PATH) as connection:
+        mapping = pd.read_sql_query(
+            "SELECT original_name, storage_name FROM techregime_column_map", connection
+        )
+    by_name = dict(zip(mapping["original_name"].astype(str).str.strip(), mapping["storage_name"]))
+
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for alias, original_name in TECHREGIME_SOURCE_NAMES.items():
+        storage = by_name.get(original_name)
+        if storage is None:
+            missing.append(f"{alias} ← {original_name!r}")
+        else:
+            resolved[alias] = str(storage)
+    if missing:
+        raise KeyError(
+            "techregime_column_map: не найдены колонки " + "; ".join(missing)
+            + ". Выгрузка сменила заголовки — сверьте имена, номера столбцов "
+              "использовать нельзя."
+        )
+    for alias in TECHREGIME_ABSENT_COLUMNS:
+        resolved[alias] = "NULL"
+    return resolved
 
 TELEMETRY_DAILY_COLUMN_CANDIDATES = {
     "freq": ("frequency_hz",),
@@ -67,7 +141,14 @@ TELEMETRY_DAILY_COLUMN_CANDIDATES = {
     "rzab": ("P_bhp_atm",),
     "qliq": ("Qliq_m3d",),
     "watercut": ("watercut_percent",),
-    "gas_factor": ("GLF_m3m3",),
+    # ⚠⚠ ГФ, а НЕ ГЖФ. Раньше здесь стоял ``GLF_m3m3`` — газ на куб ЖИДКОСТИ, — тогда
+    # как техрежим отдаёт газ на тонну НЕФТИ. Одна колонка несла две величины,
+    # расходящиеся в 2.5–3 раза, и обновление телеметрии молча подменило смысл
+    # `gas_factor` на 50–60 % строк 2021–2024. ``gas_factor_m3t`` появляется в
+    # хранилище после пересборки телеметрии; до неё колонка берётся из техрежима,
+    # то есть определение остаётся ЕДИНЫМ в любом случае.
+    "gas_factor": ("gas_factor_m3t",),
+    "gas_liquid_ratio_m3m3": ("GLF_m3m3",),
     "qgas": ("Qgas_m3d",),
     "kprod": (),
 }
@@ -153,27 +234,46 @@ def _load_telemetry_daily(wells: list[str], date_from: pd.Timestamp | None = Non
 
 
 def _load_techregime_daily(wells: list[str], date_from: pd.Timestamp | None = None, date_to: pd.Timestamp | None = None) -> pd.DataFrame:
-    normalized_wells = [str(well).strip() for well in wells if str(well).strip()]
+    """Daily techregime rows for the given wells, aggregated to one row per (well, day).
+
+    ⚠⚠ Фильтрация идёт по **нормализованному** ключу ``_meta_normalized_well_id`` и по
+    **ISO-дате** ``_meta_report_date``, а не по сырым ``col_0003`` / ``col_0010``.
+    Причины разные, но обе кусаются:
+
+    * сырой ключ (``Ya_403``) совпадёт с фондом только пока обе стороны пишут скважину
+      одинаково. Телеметрия хранит ``ya_403``, и стоит списку скважин прийти оттуда —
+      пересечение станет ПУСТЫМ, а не частичным, то есть техрежим молча исчезнет
+      целиком (на сегодняшнем фонде совпадают 931 скважина из 995 при обоих ключах,
+      так что потерь пока нет — это защита, а не починка);
+    * сырая дата ``01.04.2018`` сравнивается с границей ``2020-01-01`` КАК СТРОКА:
+      ``'01.04.2018' >= '2020-01-01'`` ложно, потому что ``'0' < '2'``. Любой вызов с
+      ``date_from`` отсекал почти всё. Витрина зовёт загрузчик без дат, поэтому дефект
+      был латентным.
+    """
+    normalized_wells = sorted({normalize_well_key(well) for well in wells if normalize_well_key(well)})
     if not normalized_wells:
         return _empty_daily_frame()
 
-    query_select = ", ".join([f"{storage} as {alias}" for alias, storage in TECHREGIME_QUERY_COLUMNS.items()])
-    date_clause, date_params = _build_date_clause(date_from, date_to, "col_0010")
+    columns = resolve_techregime_columns()
+    query_select = ", ".join(
+        f"{columns[alias]} as {alias}" for alias in CANONICAL_COLUMNS if alias in columns
+    )
+    date_clause, date_params = _build_date_clause(date_from, date_to, "_meta_report_date")
     frames: list[pd.DataFrame] = []
     with sqlite3.connect(TECHREGIME_DB_PATH) as connection:
         for start in range(0, len(normalized_wells), 400):
             chunk = normalized_wells[start : start + 400]
             placeholders = ",".join(["?"] * len(chunk))
             query = f"""
-                SELECT col_0003 as well_id, col_0010 as dt, {query_select}
+                SELECT _meta_normalized_well_id as well_id, _meta_report_date as dt, {query_select}
                 FROM techregime_records
-                WHERE col_0003 IN ({placeholders}){date_clause}
+                WHERE _meta_normalized_well_id IN ({placeholders}){date_clause}
             """
             frames.append(pd.read_sql_query(query, connection, params=[*chunk, *date_params]))
     df = pd.concat(frames, ignore_index=True) if frames else _empty_daily_frame()
     if df.empty:
         return _empty_daily_frame()
-    df["dt"] = pd.to_datetime(df["dt"], dayfirst=True, errors="coerce")
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df["well_id"] = df["well_id"].astype("string").str.strip()
     for column in CANONICAL_COLUMNS:
         df[column] = _numeric(df[column])
@@ -332,11 +432,57 @@ def add_dynamic_salt_proxies(
     return working
 
 
+@lru_cache(maxsize=1)
+def load_well_licence_map() -> pd.DataFrame:
+    """``well_key -> (месторождение, код ЛУ)`` из сырого слоя телеметрии.
+
+    ⚠ Код ЛУ берётся из ИМЕНИ ФАЙЛА выгрузки: телеметрия выгружается по одному файлу
+    на лицензионный участок (``Выгрузка телеметрии Vt 20260815.xlsx``), и это самый
+    прямой носитель принадлежности. Длинное название участка («Верхнетирский
+    участок») в справочнике плотностей не встречается, а код — встречается.
+
+    ⚠⚠ Соответствие НЕ выводится из отношения ГФ/ГЖФ. Отношение служит контролем
+    стыковки (``analysis.data.oil_density.validate_against_observed``), и выводить из
+    него же ключ означало бы проверять величину ею самой.
+    """
+    import sqlite3
+
+    with sqlite3.connect(TELEMETRY_DB_PATH) as connection:
+        mapping = pd.read_sql_query(
+            "SELECT original_name, storage_name FROM telemetry_column_map", connection
+        )
+        columns = dict(zip(mapping["original_name"], mapping["storage_name"]))
+        needed = {"Месторождение", "ЛУ", "Скважина"}
+        missing = needed - set(columns)
+        if missing:
+            raise KeyError(f"telemetry_column_map: нет колонок {sorted(missing)}")
+        raw = pd.read_sql_query(
+            f'SELECT DISTINCT _meta_normalized_well well_key, {columns["Месторождение"]} field, '
+            f'{columns["ЛУ"]} lu_name, _meta_source_file source_file FROM telemetry_raw',
+            connection,
+        )
+
+    raw["lu"] = raw["source_file"].astype("string").str.extract(r"телеметрии\s+([A-Za-zА-Яа-яЁё]+)\s", expand=False)
+    raw = raw.dropna(subset=["well_key"]).drop_duplicates(subset=["well_key"], keep="first")
+    return raw[["well_key", "field", "lu_name", "lu"]].reset_index(drop=True)
+
+
+#: Приоритет источников при слиянии. ⚠⚠ «Телеметрия первая» принято ПО УМОЛЧАНИЮ,
+#: а не по проверке: на пересечении 2022–23 источники расходятся (дебит r = 0.883,
+#: совпадает 67 % строк; обводнённость r = 0.604, 68 %), и какой ближе к истине —
+#: неизвестно. Переключатель нужен, чтобы обе витрины можно было сравнить НА МОДЕЛИ,
+#: а не спорить о них умозрительно.
+SOURCE_PRIORITIES = ("telemetry", "techregime")
+
+
 def load_daily_merged(
     wells: list[str],
     date_from: pd.Timestamp | None = None,
     date_to: pd.Timestamp | None = None,
+    prefer: str = "telemetry",
 ) -> pd.DataFrame:
+    if prefer not in SOURCE_PRIORITIES:
+        raise ValueError(f"prefer must be one of {SOURCE_PRIORITIES}, got {prefer!r}")
     telemetry = _load_telemetry_daily(wells, date_from=date_from, date_to=date_to)
     techregime = _load_techregime_daily(wells, date_from=date_from, date_to=date_to)
 
@@ -344,6 +490,18 @@ def load_daily_merged(
     techregime = techregime.copy()
     telemetry["well_key"] = telemetry["well_id"].map(normalize_well_key)
     techregime["well_key"] = techregime["well_id"].map(normalize_well_key)
+
+    # ⚠⚠ Контроль стыковки печатается СРАЗУ, а не восстанавливается потом по витрине.
+    # Ноль совпавших строк означает не «нет общих данных», а сломанный ключ или формат
+    # даты — и различить это постфактум невозможно.
+    control = daily_merge_control(telemetry, techregime, None)
+    if control["telemetry_rows"] and control["techregime_rows"]:
+        share = control["matched_share"]
+        marker = "⚠⚠ " if share == 0 else ("⚠ " if share < 0.5 else "")
+        print(
+            f"  {marker}стыковка телеметрия↔техрежим: {control['matched_rows']} из "
+            f"{control['telemetry_rows']} строк телеметрии нашли пару ({share:.1%})"
+        )
 
     merged = telemetry.merge(
         techregime,
@@ -360,35 +518,177 @@ def load_daily_merged(
             "dt": merged["dt"],
         }
     )
+    # ── провенанс НА КАЖДУЮ КОЛОНКУ ───────────────────────────────────────────
+    # ⚠⚠ Одной метки на строку недостаточно, и это не придирка. Строка помечается
+    # «telemetry», если ХОТЬ ОДНА колонка пришла из телеметрии — обычно это дебит.
+    # Частота при этом сплошь техрежимная: в telemetry_daily её до 2025 года ровно
+    # 0 %. Из-за построчной метки в отчёте выходило «99.5 % частоты в
+    # telemetry-строках» при нулевой частоте в самой телеметрии, и вопрос «откуда
+    # взято ЭТО значение частоты» не имел ответа вообще.
+    any_tel = pd.Series(False, index=merged.index)
     for column in CANONICAL_COLUMNS:
         tel_series = _numeric(merged.get(f"{column}_tel", pd.Series(np.nan, index=merged.index, dtype=float)))
         tr_series = _numeric(merged.get(f"{column}_tr", pd.Series(np.nan, index=merged.index, dtype=float)))
-        result[column] = tel_series.combine_first(tr_series)
-    source = pd.Series(pd.NA, index=merged.index, dtype="string")
-    any_tel = pd.Series(False, index=merged.index)
-    for column in CANONICAL_COLUMNS:
-        any_tel = any_tel | _numeric(merged.get(f"{column}_tel", pd.Series(np.nan, index=merged.index, dtype=float))).notna()
-    source.loc[any_tel] = "telemetry"
-    source.loc[~any_tel] = "techregime"
-    result["source"] = source
+        provenance = pd.Series(SOURCE_ABSENT, index=merged.index, dtype="string")
+        if prefer == SOURCE_TECHREGIME:
+            result[column] = tr_series.combine_first(tel_series)
+            provenance.loc[tel_series.notna()] = SOURCE_TELEMETRY
+            provenance.loc[tr_series.notna()] = SOURCE_TECHREGIME
+        else:
+            result[column] = tel_series.combine_first(tr_series)
+            provenance.loc[tr_series.notna()] = SOURCE_TECHREGIME
+            provenance.loc[tel_series.notna()] = SOURCE_TELEMETRY
+        result[f"{column}{SOURCE_SUFFIX}"] = provenance
+        any_tel = any_tel | tel_series.notna()
+
+    # ⚠ Построчная метка СОХРАНЕНА, но названа честно: `row_source` значит «в этой
+    # строке хоть что-то от телеметрии», а НЕ «эти значения из телеметрии».
+    # `source` оставлен синонимом, чтобы не рвать существующих потребителей.
+    row_source = pd.Series(SOURCE_TECHREGIME, index=merged.index, dtype="string")
+    row_source.loc[any_tel] = SOURCE_TELEMETRY
+    result["row_source"] = row_source
+    result["source"] = row_source
+
     result = result.loc[result["well_id"].notna() & result["dt"].notna()].copy()
+    provenance_columns = [f"{column}{SOURCE_SUFFIX}" for column in CANONICAL_COLUMNS]
+    aggregation = {column: "mean" for column in CANONICAL_COLUMNS}
+    aggregation.update({column: "first" for column in [*provenance_columns, "row_source", "source"]})
     result = (
-        result.groupby(["well_id", "dt", "source"], as_index=False)[CANONICAL_COLUMNS]
-        .mean(numeric_only=True)
+        result.groupby(["well_id", "dt"], as_index=False)
+        .agg(aggregation)
         .sort_values(["well_id", "dt"])
         .reset_index(drop=True)
     )
+    return _attach_gas_axes(result)
+
+
+def _attach_gas_axes(daily: pd.DataFrame) -> pd.DataFrame:
+    """Обе газовые оси явными колонками плюс плотность и её провенанс.
+
+    ⚠⚠ Решение о базе здесь НЕ принимается — его примет модель по кросс-проверке.
+    От данных требуется только возможность выбора, поэтому обе оси лежат рядом:
+
+    ``gas_factor_m3t``          газ на ТОННУ НЕФТИ (синоним историческому ``gas_factor``);
+    ``gas_liquid_ratio_m3m3``   газ на КУБ ЖИДКОСТИ;
+    ``oil_density_t_m3``        плотность из СПРАВОЧНИКА;
+    ``gas_liquid_ratio_m3m3_src``  ``measured`` / ``converted`` / ``absent``.
+
+    ⚠ ГЖФ берётся ИЗМЕРЕННЫМ там, где источник его даёт (телеметрия отдаёт
+    «Газожидкостный фактор, м3/м3» напрямую), и пересчитывается из ГФ только там, где
+    измерения нет. Пересчёт без плотности не делается: пропуск остаётся пропуском, а
+    не заполняется соседним участком — неверная плотность молча масштабирует всю ось
+    на несколько процентов, и отличить это потом от физики нельзя.
+    """
+    from analysis.data.oil_density import attach_density, gas_liquid_ratio_from_gor
+
+    result = daily.copy()
+    result[GAS_FACTOR_COLUMN] = result["gas_factor"]
+    result[f"{GAS_FACTOR_COLUMN}{SOURCE_SUFFIX}"] = result.get(f"gas_factor{SOURCE_SUFFIX}")
+
+    licences = load_well_licence_map()
+    result["well_key"] = result["well_id"].map(normalize_well_key)
+    result = result.merge(licences[["well_key", "field", "lu"]], on="well_key", how="left")
+    result = attach_density(result, field_col="field", lu_col="lu", well_col="well_id",
+                            out_col=OIL_DENSITY_COLUMN)
+
+    measured = _numeric(result.get(GAS_LIQUID_RATIO_COLUMN, pd.Series(np.nan, index=result.index)))
+    converted = gas_liquid_ratio_from_gor(
+        result[GAS_FACTOR_COLUMN], result[OIL_DENSITY_COLUMN], result["watercut"]
+    )
+    result[GAS_LIQUID_RATIO_COLUMN] = measured.combine_first(converted)
+    provenance = pd.Series(SOURCE_ABSENT, index=result.index, dtype="string")
+    provenance.loc[converted.notna()] = "converted"
+    provenance.loc[measured.notna()] = "measured"
+    result[f"{GAS_LIQUID_RATIO_COLUMN}{SOURCE_SUFFIX}"] = provenance
     return result
 
 
+def column_coverage_by_year(
+    frame: pd.DataFrame,
+    columns: Iterable[str] | None = None,
+    *,
+    date_col: str = "dt",
+) -> pd.DataFrame:
+    """Заполненность колонок по годам, в процентах строк.
+
+    ⚠⚠ Смотреть ДО того, как ставить фильтр по нескольким колонкам разреженного
+    источника. Условие «И» на колонке с нулевым покрытием обнуляет выборку целиком и
+    выглядит содержательным результатом: ``WHERE frequency_hz > 0 AND Qliq_m3d > 0``
+    по телеметрии даёт НОЛЬ строк во все годы до 2025 — не потому, что фонд стоял, а
+    потому что частоты там нет вовсе, а дебит есть. На этом однажды был построен и
+    попал в отчёт вывод «слои опираются на 2021+».
+    """
+    if frame.empty or date_col not in frame.columns:
+        return pd.DataFrame()
+    columns = list(columns) if columns is not None else [
+        c for c in frame.columns if c not in (date_col,) and not c.endswith(SOURCE_SUFFIX)
+    ]
+    working = frame.copy()
+    working["_год"] = pd.to_datetime(working[date_col], errors="coerce").dt.year
+    grouped = working.groupby("_год")
+    report = pd.DataFrame({"строк": grouped.size()})
+    for column in columns:
+        if column in working.columns:
+            report[column] = (grouped[column].count() / grouped.size() * 100).round(1)
+    return report.reset_index()
+
+
+def daily_merge_control(telemetry: pd.DataFrame, techregime: pd.DataFrame, merged: pd.DataFrame) -> dict:
+    """Контроль стыковки: сколько строк телеметрии нашли пару в техрежиме.
+
+    ⚠⚠ Ожидание — заметная доля, а НОЛЬ означает не «нет общих данных», а сломанный
+    ключ или формат даты. Отличить одно от другого постфактум невозможно, поэтому
+    число выводится в лог сборки, а не восстанавливается потом по витрине.
+    """
+    if telemetry.empty or techregime.empty:
+        return {"telemetry_rows": len(telemetry), "techregime_rows": len(techregime), "matched_rows": 0, "matched_share": 0.0}
+    tel_keys = set(zip(telemetry["well_id"].map(normalize_well_key), telemetry["dt"]))
+    tr_keys = set(zip(techregime["well_id"].map(normalize_well_key), techregime["dt"]))
+    matched = len(tel_keys & tr_keys)
+    return {
+        "telemetry_rows": len(telemetry),
+        "techregime_rows": len(techregime),
+        "matched_rows": matched,
+        "matched_share": matched / max(len(tel_keys), 1),
+    }
+
+
+def column_provenance_report(df: pd.DataFrame) -> pd.DataFrame:
+    """Откуда взято значение каждой канонной колонки — в долях строк.
+
+    Отвечает ровно на тот вопрос, который до сих пор не имел ответа: «частота в
+    этом окне — измерена телеметрией или взята из уставки техрежима?»
+    """
+    rows = []
+    for column in CANONICAL_COLUMNS:
+        source_column = f"{column}{SOURCE_SUFFIX}"
+        if source_column not in df.columns:
+            continue
+        counts = df[source_column].value_counts(dropna=False)
+        total = int(counts.sum()) or 1
+        rows.append(
+            {
+                "колонка": column,
+                "телеметрия": int(counts.get(SOURCE_TELEMETRY, 0)),
+                "техрежим": int(counts.get(SOURCE_TECHREGIME, 0)),
+                "нет": int(counts.get(SOURCE_ABSENT, 0)),
+                "доля_телеметрии": round(int(counts.get(SOURCE_TELEMETRY, 0)) / total, 4),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def source_coverage_report(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or "source" not in df.columns:
+    # ⚠ Это ПОСТРОЧНАЯ картина, а не «откуда взяты значения». Поколоночный ответ
+    # даёт `column_provenance_report`.
+    label = "row_source" if "row_source" in df.columns else "source"
+    if df.empty or label not in df.columns:
         return pd.DataFrame(columns=["well_id", "telemetry_rows", "techregime_rows", "total_rows", "telemetry_fraction"])
     working = df.copy()
     rows: list[dict[str, object]] = []
     for well_id, frame in working.groupby("well_id", dropna=False):
-        telemetry_rows = int(frame["source"].eq("telemetry").sum())
-        techregime_rows = int(frame["source"].eq("techregime").sum())
+        telemetry_rows = int(frame[label].eq(SOURCE_TELEMETRY).sum())
+        techregime_rows = int(frame[label].eq(SOURCE_TECHREGIME).sum())
         total_rows = int(len(frame))
         rows.append(
             {

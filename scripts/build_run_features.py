@@ -17,8 +17,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from analysis.input_paths import resolve_v03_all_path
-from analysis.modeling_config import (
 from analysis.paths import results_dir
+from analysis.modeling_config import (
     DEFAULT_GLF_THRESHOLD,
     DEFAULT_INFANT_MORTALITY_DAYS,
     DEFAULT_MATURE_WINDOW_DAYS,
