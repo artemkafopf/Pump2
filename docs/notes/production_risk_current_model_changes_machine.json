@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "as_of_date": "2026-07-15",
+  "model_bundle": {
+    "bundle_date": "2026-07-15-mc2023plus",
+    "repo_bundle_dir": "results/esp_survival_vba_models/2026-07-15-mc2023plus",
+    "packaged_dir": "dist/Pump2ProductionRisk",
+    "default_config": {
+      "file": "backend/analysis/workflows/production_risk/config.py",
+      "BUNDLE_DATE": "2026-07-15-mc2023plus"
+    },
+    "files": {
+      "survival_registry": "esp_models.csv",
+      "time_map": "esp_time_map.csv",
+      "hazard_coefficients": "esp_cox_coeffs.csv",
+      "run_covariates": "esp_run_covariates.csv",
+      "observed_failures": "esp_observed_failures.csv",
+      "manifest": "manifest.json"
+    }
+  },
+  "key_changes": [
+    {
+      "id": "mc_baseline_changed",
+      "status": "accepted",
+      "description": "Mc_nonsour_Pooled switched from all-vintage to install_2023plus.",
+      "stratum": "Mc_nonsour_Pooled",
+      "mc_window": "install_2023plus",
+      "reason": "All-vintage under-predicted Mc failures in 2024-01..2026-06; install_2023plus passes D/E fact/model gate."
+    },
+    {
+      "id": "manual_calibration_retired",
+      "status": "accepted",
+      "description": "Legacy Ya/Vt model-field and reporting-field manual calibration factors are disabled.",
+      "code": {
+        "_CALIBRATION_FACTORS": {},
+        "_REPORTING_FIELD_CALIBRATION_FACTORS": {}
+      }
+    },
+    {
+      "id": "observed_failures_bundled",
+      "status": "accepted",
+      "description": "Production failure-rate chart reads bundle-level A-population observed numerator when esp_observed_failures.csv is present.",
+      "file": "esp_observed_failures.csv",
+      "reason": "Align production chart numerator with D/E validation population."
+    },
+    {
+      "id": "time_map_idle_gate_enabled",
+      "status": "accepted",
+      "description": "Bundle includes time-map placement rows and gated idle-hazard rows.",
+      "file": "esp_time_map.csv",
+      "interpretation": "Time map is placement-oriented, not a standalone level-fix."
+    },
+    {
+      "id": "hazard_layer_not_refit",
+      "status": "pending_refit",
+      "description": "Hazard layer and Ql dynamic hazard are carried forward as stress sensitivity, not refit on the accepted baseline.",
+      "required_next_workstream": "Refit Workstream C on bundle 2026-07-15-mc2023plus and run OOS validation."
+    }
+  ],
+  "accepted_fact_model_2024_01_to_2026_06": [
+    {
+      "field": "Мирнинский УН",
+      "observed_failures": 41.0,
+      "predicted_failures": 41.27,
+      "fact_model_ratio": 0.99,
+      "pass_0p90_1p10": true
+    },
+    {
+      "field": "Ярактинский УН",
+      "observed_failures": 212.0,
+      "predicted_failures": 223.65,
+      "fact_model_ratio": 0.95,
+      "pass_0p90_1p10": true
+    },
+    {
+      "field": "Верхнетирский УН",
+      "observed_failures": 223.0,
+      "predicted_failures": 218.52,
+      "fact_model_ratio": 1.02,
+      "pass_0p90_1p10": true
+    },
+    {
+      "field": "ГЛОБАЛЬНО",
+      "observed_failures": 680.0,
+      "predicted_failures": 707.0,
+      "fact_model_ratio": 0.96,
+      "pass_0p90_1p10": true
+    }
+  ],
+  "focus_survival_parameters": [
+    {
+      "stratum": "Mc_nonsour_Pooled",
+      "model_kind": "k1_aic",
+      "w1": 0.0,
+      "beta1": 1.252036,
+      "eta1": 674.02,
+      "beta2": 1.252036,
+      "eta2": 674.02,
+      "b20": 203.4,
+      "b50": 503.0,
+      "b80": 985.7,
+      "n_runs": 166,
+      "n_failures": 42,
+      "n_censored": 124,
+      "n_big_censored": 59,
+      "mc_window": "install_2023plus"
+    },
+    {
+      "stratum": "Ya_nonsour_Pooled",
+      "model_kind": "k1_aic",
+      "w1": 0.0,
+      "beta1": 0.798402,
+      "eta1": 706.05,
+      "beta2": 0.798402,
+      "eta2": 706.05,
+      "b20": 107.9,
+      "b50": 446.1,
+      "b80": 1281.4,
+      "n_runs": 2118,
+      "n_failures": 1192,
+      "n_censored": 926,
+      "n_big_censored": 353
+    },
+    {
+      "stratum": "Vt_nonsour_Pooled",
+      "model_kind": "k2_high_w1",
+      "w1": 0.88784,
+      "beta1": 0.837262,
+      "eta1": 491.22,
+      "beta2": 1.010237,
+      "eta2": 3404.02,
+      "b20": 94.2,
+      "b50": 375.8,
+      "b80": 1129.5,
+      "n_runs": 452,
+      "n_failures": 198,
+      "n_censored": 254,
+      "n_big_censored": 123
+    },
+    {
+      "stratum": "Vt_sour_Pooled",
+      "model_kind": "k1_aic",
+      "w1": 0.0,
+      "beta1": 0.920152,
+      "eta1": 146.76,
+      "beta2": 0.920152,
+      "eta2": 146.76,
+      "b20": 28.8,
+      "b50": 98.5,
+      "b80": 246.2,
+      "n_runs": 164,
+      "n_failures": 111,
+      "n_censored": 53,
+      "n_big_censored": 29
+    },
+    {
+      "stratum": "Global_Pooled",
+      "model_kind": "k1_aic",
+      "w1": 0.0,
+      "beta1": 0.780016,
+      "eta1": 699.1,
+      "beta2": 0.780016,
+      "eta2": 699.1,
+      "b20": 102.2,
+      "b50": 437.0,
+      "b80": 1286.8,
+      "n_runs": 4036,
+      "n_failures": 2096,
+      "n_censored": 1940,
+      "n_big_censored": 775
+    }
+  ],
+  "current_hazard_layer": {
+    "status": "old_not_refit",
+    "primary_usage": false,
+    "stress_usage": true,
+    "hazard_coefficients_file": "esp_cox_coeffs.csv",
+    "ship_reason": "physical_sensitivity_not_oos_validated",
+    "ql": {
+      "enabled": true,
+      "status": "sign_corrected_plain_ph_sensitivity",
+      "source": "production_risk_hazard_refit_c/2026-07-15 (sign-corrected plain-PH sensitivity)",
+      "prior_source": "chem_ql_transform_screen/2026-07-14",
+      "covariate": "log_mean_qliq_m3d_field_ref_clip5",
+      "formula": "z = clip(log1p(Ql_m3d) - log1p(Ql_ref_field_m3d), +/- log(5)); theta = exp(z * (beta + gamma * log(max(age, 1))))",
+      "beta": 0.070,
+      "gamma": 0.0,
+      "prior_beta": -0.587058,
+      "prior_gamma": 0.093473,
+      "sign_correction_note": "Workstream C: prior Extended-Cox served a physically backwards effect (higher Ql -> lower young-pump hazard) driven by the collinear z*log(age) term. Serve-consistent monthly refit shows the empirical association is positive (higher Ql -> more failures). Lagged/lead causal check (lead t+3 beta=+0.84 vs lag t-3 beta=+0.09) shows most of the raw association is reverse causation, leaving a small forward effect. Ql now ships as a plain positive PH dial (gamma=0, beta=+0.07), stress-only, NOT promoted into base_p50 (does not improve OOS).",
+      "cap_log_ratio": 1.6094379124341003,
+      "global_ref_log": 4.050671,
+      "field_ref_log": {
+        "Az": 3.9468,
+        "Da": 3.689805,
+        "Ic": 3.889624,
+        "Mc": 3.782201,
+        "Vt": 4.016012,
+        "Ya": 4.253127,
+        "Za": 3.832684
+      }
+    }
+  },
+  "verification": {
+    "python_cli_excel": "python scripts/run/production_risk.py --full-tables",
+    "exe_build": "powershell -ExecutionPolicy Bypass -File scripts/build_production_risk_exe.ps1",
+    "frozen_smoke_test": "dist/Pump2ProductionRisk/Pump2ProductionRisk.exe --no-excel --full-tables",
+    "focused_tests": "cd backend && python -m pytest tests/test_production_risk_joint_validation.py tests/test_production_risk_time_map.py -q",
+    "focused_tests_result": "6 passed"
+  }
+}
