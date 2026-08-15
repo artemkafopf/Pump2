@@ -13,8 +13,13 @@ for _p in (str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "scripts"
         sys.path.insert(0, _p)
 
 from scripts.db import get_warehouse_conn
-from analysis.paths import resolve_v03_failures_path
+from analysis.paths import resolve_svod_main_path
 from scripts.data_utils import normalize_well_key
+from analysis.ingest.svod.causes import (
+    NODE_CATEGORY_COLUMN,
+    classify_failure_row as _classify_failure_row,
+    has_node_diagnosis,
+)
 from .config import (
     FAILURE_CATEGORIES, FREQ_LOW_MAX, FREQ_HIGH_MIN, FREQ_VERY_HIGH_MIN,
     FREQ_HIGH_PCT_THRESHOLD, VT_FIELD,
@@ -22,82 +27,20 @@ from .config import (
 
 
 # ---------------------------------------------------------------------------
-# Failure category classifier (mirrors streamlit_apps/freq_exposure_app.py)
+# Failure category classifier
+#
+# ⚠ Классификатор ЖИВЁТ ОДИН и лежит в сборщике (`analysis.ingest.svod.causes`),
+# потому что теперь его применяет САМ Свод: колонка «узел_категория» приезжает
+# уже заполненной. Здесь остался только импорт — копия правил в двух местах и
+# была тем разрывом, ради которого сборщик переносили в этот репозиторий.
+#
+# ⚠⚠ У общего классификатора ``default=None``: когда не сработало ни одно
+# правило, категории НЕТ. Прежний дефолт «Износ РО» на полном регистре
+# приписывал +109 выдуманных износов (278 вместо 169).
 # ---------------------------------------------------------------------------
 
 def _s(val) -> str:
     return str(val).strip().lower() if pd.notna(val) else ""
-
-
-def _classify_failure_row(row) -> str:
-    uzl  = _s(row.get("Отказавший узел", ""))
-    elem = _s(row.get("Отказавший элемент", ""))
-    char = _s(row.get("Характер неисправности", ""))
-    prch = _s(row.get("Причина отказа УЭЦН", ""))
-
-    cable_elems = {
-        "кабельный удлинитель", "основная длина", "кабельный сросток",
-        "кабельная муфта", "термовставка", "сальниковая разделка",
-    }
-    motor_elems = {"статор с обмоткой", "верхнее лобовое", "ротор", "выводные концы", "колодка токоввода"}
-    nkt_uzly    = {"нкт", "нкт ", "клапан сливной", "подвесной патрубок", "клапан обратный",
-                   "мандрель", "переводник", "подвесной патрубок "}
-    clog_words  = ("засорен", "твердые отложения", "солеотложени")
-    wear_words  = ("разрушен", "износ", "осевой", "пар трения", "радиальный", "промыв", "трещин", "эрозион")
-
-    if uzl == "кабельная линия": return "КЛ (R-0)"
-    if uzl == "тмс":             return "КЛ (R-0)"
-    if elem in cable_elems and any(w in char for w in ("изоляц", "прогар", "оплавл", "механич", "разрушен")):
-        return "КЛ (R-0)"
-    if uzl == "пэд" and elem not in ("узел пяты", "шлицевая муфта"):
-        return "ПЭД (R-0)"
-    if elem in motor_elems and any(w in char for w in ("замыкание", "электропробой", "прогар", "перегрев", "изоляц")):
-        return "ПЭД (R-0)"
-    if uzl == "гидрозащита": return "Износ/негермет.гидрозащиты"
-    if "вал" in elem and "слом" in char: return "Слом вала"
-    if "шлицевая муфта" in elem and any(w in char for w in ("слом", "разрушен")) and uzl != "гидрозащита":
-        return "Слом вала"
-    if "корпус" in elem and "слом" in char: return "Слом вала"
-    if uzl in nkt_uzly or "нкт" in uzl: return "НКТ"
-    if "подвеска нкт" in elem: return "НКТ"
-
-    pump_uzly = {"эцн", "газосепаратор", "диспергатор", "входной модуль"}
-    if uzl in pump_uzly:
-        if "рабочие органы" in elem:
-            if any(w in char for w in wear_words):  return "Износ РО"
-            if any(w in char for w in clog_words):  return "Засорение РО"
-            if any(w in prch for w in ("засорен", "солеотложени")): return "Засорение РО"
-            return "Засорение РО"
-        if "вал" in elem: return "Слом вала"
-        if any(w in char for w in wear_words) or any(w in prch for w in ("коррозия", "эрозион")):
-            return "Износ РО"
-        if any(w in char for w in clog_words) or any(w in prch for w in ("засорен", "солеотложени")):
-            return "Засорение РО"
-        return "Износ РО"
-
-    if uzl == "пэд" and "узел пяты" in elem: return "Износ РО"
-    if uzl == "пэд": return "ПЭД (R-0)"
-
-    scores = {cat: 0 for cat in FAILURE_CATEGORIES}
-    if elem in cable_elems:                          scores["КЛ (R-0)"] += 2
-    if any(w in char for w in ("кабел", "изоляц")): scores["КЛ (R-0)"] += 1
-    if elem in motor_elems:                          scores["ПЭД (R-0)"] += 2
-    if "замыкание" in char:                          scores["ПЭД (R-0)"] += 2
-    if "вал" in elem:                                scores["Слом вала"] += 2
-    if "слом" in char:                               scores["Слом вала"] += 2
-    if "рабочие органы" in elem:
-        if any(w in char for w in clog_words): scores["Засорение РО"] += 3
-        if any(w in char for w in wear_words): scores["Износ РО"] += 3
-    if any(w in char for w in clog_words): scores["Засорение РО"] += 1
-    if any(w in char for w in wear_words): scores["Износ РО"] += 1
-    if "нкт" in uzl or "подвеска нкт" in elem: scores["НКТ"] += 2
-    if "обрыв" in char:                        scores["НКТ"] += 1
-    if any(w in elem for w in ("уплотнен", "пяты")) or "пята" in char:
-        scores["Износ/негермет.гидрозащиты"] += 2
-    if "негермет" in char: scores["Износ/негермет.гидрозащиты"] += 1
-
-    best = max(scores, key=scores.get)
-    return best if scores[best] > 0 else "Износ РО"
 
 
 def load_failure_categories() -> pd.DataFrame:
@@ -105,30 +48,70 @@ def load_failure_categories() -> pd.DataFrame:
 
     Returns one row per Excel row with columns:
     well_key, mount_date, stop_date, failure_category, h2s_class_excel
+
+    ⚠ Источник — ОСНОВНОЙ Свод, а не выгрузка ``_БДА_V03_failures``. В той выгрузке
+    отказавший узел заполнен у 1573 строк из 1573, то есть она отфильтрована ПО НАЛИЧИЮ
+    диагноза: пуск без узла в неё просто не попадает, и отличить «узел неизвестен» от
+    «строки нет» по ней нельзя. Основной регистр покрывает 1577 отказов нашей популяции
+    против 1452 и снимает 18 категорий «не определено».
+
+    ⚠⚠ У полного регистра появляется то, чего в выгрузке отказов не было: НЕСКОЛЬКО строк
+    на один пуск — например подъём по ГТМ рядом со строкой отказа. Дедупликация поэтому
+    сначала сортирует определённые категории вперёд, иначе строка без диагноза может
+    вытеснить строку с ним.
+
+    ⚠ Категория БЕРЁТСЯ ИЗ РЕГИСТРА, если он её несёт. Свод, собранный
+    ``analysis.ingest.svod``, приезжает уже с колонкой ``узел_категория`` — в этом и был
+    смысл переноса сборщика — и пересчитывать её здесь значит снова заводить второе место,
+    где живут те же правила. Регистр без этой колонки (собранный прежним сборщиком)
+    классифицируется на лету тем же самым классификатором.
     """
-    path = Path(resolve_v03_failures_path())
+    path = Path(resolve_svod_main_path())
+    base_columns = [
+        "Скв.", "Дата монтажа", "Дата остановки",
+        "Отказавший узел", "Отказавший элемент",
+        "Характер неисправности", "Причина отказа УЭЦН",
+        "Кислый/Некислый",
+    ]
+    available = set(pd.read_excel(path, sheet_name="Свод", header=0, nrows=0).columns)
+    has_precomputed = NODE_CATEGORY_COLUMN in available
     df = pd.read_excel(
         path,
         sheet_name="Свод",
         header=0,
-        usecols=[
-            "Скв.", "Дата монтажа", "Дата остановки",
-            "Отказавший узел", "Отказавший элемент",
-            "Характер неисправности", "Причина отказа УЭЦН",
-            "Кислый/Некислый",
-        ],
+        usecols=base_columns + ([NODE_CATEGORY_COLUMN] if has_precomputed else []),
     )
     df["well_key"]   = df["Скв."].astype("string").str.strip().map(normalize_well_key)
     df["mount_date"] = pd.to_datetime(df["Дата монтажа"], errors="coerce").dt.normalize()
     df["stop_date"]  = pd.to_datetime(df["Дата остановки"], errors="coerce").dt.normalize()
-    df["failure_category"] = df.apply(_classify_failure_row, axis=1)
+    if has_precomputed:
+        df["failure_category"] = df[NODE_CATEGORY_COLUMN].where(
+            df[NODE_CATEGORY_COLUMN].notna(), None
+        )
+    else:
+        # default=None: пустая категория вместо молчаливого «Износ РО» — см. оговорку там
+        df["failure_category"] = df.apply(_classify_failure_row, default=None, axis=1)
     df["h2s_class_excel"]  = (
         df["Кислый/Некислый"].astype("string").str.strip()
         .replace({"<NA>": "<missing>", "nan": "<missing>"})
         .fillna("<missing>")
     )
+    # ⚠⚠ БЕЗ ЭТОГО ПЕРЕКЛЮЧЕНИЕ ИСТОЧНИКА ФАБРИКУЕТ ИЗНОС. `_classify_failure_row`
+    # возвращает «Износ РО» ДЕФОЛТОМ, когда не сработало ни одно правило. В выгрузке
+    # отказов это было безобидно (там узел заполнен у всех строк), а в полном регистре
+    # почти половина строк диагноза не несёт — и все они получили бы «Износ РО»:
+    # на нашей популяции это 278 отказов вместо 169, то есть +109 выдуманных износов.
+    # Нет диагноза — значит категории нет, и она должна остаться пустой.
+    _empty = ["", "нет", "-", "—", "н/д", "nan", "<na>", "none"]
+    no_node = (df["Отказавший узел"].astype("string").str.strip().str.casefold()
+               .isin(_empty).fillna(True))
+    no_elem = (df["Отказавший элемент"].astype("string").str.strip().str.casefold()
+               .isin(_empty).fillna(True))
+    df["_нет_диагноза"] = (no_node & no_elem).astype(int)
+    df.loc[no_node & no_elem, "failure_category"] = pd.NA
     result = (
-        df[["well_key", "mount_date", "stop_date", "failure_category", "h2s_class_excel"]]
+        df.sort_values("_нет_диагноза", kind="stable")
+        [["well_key", "mount_date", "stop_date", "failure_category", "h2s_class_excel"]]
         .dropna(subset=["well_key", "mount_date", "stop_date"])
         .drop_duplicates(subset=["well_key", "mount_date", "stop_date"], keep="first")
         .reset_index(drop=True)

@@ -1,0 +1,51 @@
+"""Реестр ГРП: чтение «Свода ГРП», SQLite-хранилище и признаки для расчёта."""
+
+from .processor import (
+    CANONICAL_STAGE_COLUMNS,
+    DEFAULT_SOURCE_DIR,
+    FRAC_SHEET_NAME,
+    FracLayout,
+    build_frac_stages,
+    build_frac_wells,
+    detect_column_shift,
+    detect_layout,
+    load_frac_register,
+    merge_frac_registers,
+    resolve_frac_files,
+)
+from .sqlite_store import (
+    SQLITE_DEFAULT_PATH,
+    SQLITE_STAGES_TABLE,
+    SQLITE_WELLS_TABLE,
+    FracSQLiteBuildResult,
+    build_frac_sqlite,
+    frac_flags_for_runs,
+    load_frac_raw,
+    load_frac_stages,
+    load_frac_wells,
+    resolve_frac_sqlite_path,
+)
+
+__all__ = [
+    "CANONICAL_STAGE_COLUMNS",
+    "DEFAULT_SOURCE_DIR",
+    "FRAC_SHEET_NAME",
+    "FracLayout",
+    "FracSQLiteBuildResult",
+    "SQLITE_DEFAULT_PATH",
+    "SQLITE_STAGES_TABLE",
+    "SQLITE_WELLS_TABLE",
+    "build_frac_sqlite",
+    "build_frac_stages",
+    "build_frac_wells",
+    "detect_column_shift",
+    "detect_layout",
+    "frac_flags_for_runs",
+    "load_frac_raw",
+    "load_frac_register",
+    "load_frac_stages",
+    "load_frac_wells",
+    "merge_frac_registers",
+    "resolve_frac_files",
+    "resolve_frac_sqlite_path",
+]

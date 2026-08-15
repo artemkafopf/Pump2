@@ -79,26 +79,26 @@ _SELECT: dict[str, tuple[str, str | None]] = {
     "pump_corr_raw": ("Насос", "Коррозионная стойкость"),
     "pump_coating_raw": ("Насос", "Покрытие"),
     # gas separator / intake
-    "gassep_type": ("Газосепаратор", "Тип Газосепаратора"),
+    "gassep_type": ("Газосепаратор", ("Тип Газосепаратора", "Модель Газосепаратора")),
     "gassep_gabarit_raw": ("Газосепаратор", "Габарит ГС"),
     "intake_module": ("Газосепаратор", "Входной модуль"),
     "gassep_corr_raw": ("Газосепаратор", "Коррозионностойкость"),
     "gassep_coating_raw": ("Газосепаратор", "Покрытие"),
     # multiphase section
-    "multiphase_type": ("Мультифазная", "Тип мультиф"),
+    "multiphase_type": ("Мультифазная", ("Тип мультиф", "Модель мультиф")),
     # protector
-    "protector_type": ("Гидрозащита", "Тип Гидрозащиты"),
+    "protector_type": ("Гидрозащита", ("Тип Гидрозащиты", "Модель Гидрозащиты")),
     "protector_corr_raw": ("Гидрозащита", "Коррозионностойкость"),
     "protector_coating_raw": ("Гидрозащита", "Покрытие"),
     # motor
-    "ped_type": ("ПЭД", "Тип ПЭД"),
+    "ped_type": ("ПЭД", ("Тип ПЭД", "Модель ПЭД")),
     "ped_oil": ("ПЭД", "Тип масла"),
     "ped_max_temp_c": ("ПЭД", "Макс. темп"),
     "ped_power_kw": ("ПЭД", "Мощность"),
     "ped_corr_raw": ("ПЭД", "Коррозионностойкость"),
     "ped_coating_raw": ("ПЭД", "Покрытие"),
     # downhole sensor
-    "tms_type": ("ТМС", "Тип ТМС"),
+    "tms_type": ("ТМС", ("Тип ТМС", "Модель ТМС")),
     "tms_corr_raw": ("ТМС", "Коррозионностойкость"),
     # tubing
     "pump_depth_m": ("ФА/НКТ", "Глубина спуска УЭЦН"),
@@ -337,16 +337,31 @@ def _header_map(raw: pd.DataFrame) -> dict[int, tuple[str, str | None]]:
     return out
 
 
-def _find_column(hmap: dict[int, tuple[str, str | None]], section: str, param: str | None) -> int | None:
-    """First column whose (section, parameter) contains the requested substrings."""
-    sec_l, par_l = section.lower(), (param.lower() if param else None)
-    for i, (sec, par) in sorted(hmap.items()):
-        if sec_l not in sec.lower():
-            continue
-        if par_l is None:
-            return i
-        if par is not None and par_l in par.lower():
-            return i
+def _find_column(hmap: dict[int, tuple[str, str | None]], section: str, param) -> int | None:
+    """First column whose (section, parameter) contains the requested substrings.
+
+    ``param`` may be a tuple of alternative spellings, tried in order. ⚠ Это не
+    украшение: выгрузка паспорта от 2026-08-15 переименовала «Тип X» → «Модель X»
+    в пяти секциях (газосепаратор, мультифазная, гидрозащита, ПЭД, ТМС) при тех же
+    позициях и том же содержимом. Одного написания хватало ровно до этого дня.
+    """
+    sec_l = section.lower()
+    if param is None:
+        candidates: tuple = (None,)
+    elif isinstance(param, str):
+        candidates = (param,)
+    else:
+        candidates = tuple(param)
+
+    for candidate in candidates:
+        par_l = candidate.lower() if candidate else None
+        for i, (sec, par) in sorted(hmap.items()):
+            if sec_l not in sec.lower():
+                continue
+            if par_l is None:
+                return i
+            if par is not None and par_l in par.lower():
+                return i
     return None
 
 
