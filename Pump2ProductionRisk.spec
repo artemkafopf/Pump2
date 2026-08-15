@@ -6,11 +6,11 @@ a = Analysis(
     pathex=['backend'],
     binaries=[],
     datas=[('results\\esp_survival_vba_models', 'results\\esp_survival_vba_models')],
-    hiddenimports=['analysis.data.equipment_big', 'analysis.data.pump_type_parser', 'scripts.data_utils', 'openpyxl.cell._writer'],
+    hiddenimports=['analysis.data.equipment_big', 'analysis.data.pump_type_parser', 'openpyxl.cell._writer'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['torch', 'matplotlib', 'pytest', 'hypothesis', 'sympy', 'scipy', 'pyarrow', 'PIL', 'cryptography', 'lxml', 'IPython', 'jedi', 'tkinter', 'numba', 'llvmlite', 'shap'],
+    excludes=['torch', 'matplotlib', 'pytest', 'hypothesis', 'sympy', 'scipy', 'pyarrow', 'PIL', 'cryptography', 'lxml', 'IPython', 'jedi', 'tkinter', 'numba', 'llvmlite', 'shap', 'catboost', 'plotly', 'sklearn', 'statsmodels', 'graphviz'],
     noarchive=False,
     optimize=0,
 )

@@ -1,7 +1,7 @@
 Attribute VB_Name = "mdlProductionRiskLauncher"
 Option Explicit
 
-Private Const MODEL_CALIBRATION_NOTE As String = "ВНИМАНИЕ: прогноз отказов содержит явно отмеченные ручные поправки (Mc survival-weight, Ya/Vt и УН-калибровка; глобально = сумма УН)."
+Private Const MODEL_CALIBRATION_NOTE As String = "Ручные поправки Ya/Vt и УН-калибровка сняты: основной сценарий использует bundle 2026-07-15-mc2023plus (Mc install_2023plus + time-map/idle gate). Hazard-сценарий дополнительно использует динамический Ql: жидкость м3/мес / отработанные дни, field-ref clip5."
 
 Private Sub EnsureCalibrationNote(ByVal ws As Worksheet)
     ws.Range("A14").Value = "Поправки модели"

@@ -30,8 +30,10 @@ from scripts.deploy.inject_vba import (  # noqa: E402
 DEFAULT_OUTPUT = REPO_ROOT / "dist" / "Pump2ProductionRisk" / "ProductionRiskLauncher.xlsm"
 DEFAULT_MODULE = REPO_ROOT / "vba" / "mdlProductionRiskLauncher.bas"
 MODEL_CALIBRATION_NOTE = (
-    "ВНИМАНИЕ: прогноз отказов содержит явно отмеченные ручные поправки "
-    "(Mc survival-weight, Ya/Vt и УН-калибровка; глобально = сумма УН)."
+    "Ручные поправки Ya/Vt и УН-калибровка сняты: основной сценарий использует "
+    "bundle 2026-07-15-mc2023plus (Mc install_2023plus + time-map/idle gate). "
+    "Hazard-сценарий дополнительно использует динамический Ql: жидкость м3/мес / отработанные дни, "
+    "field-ref clip5."
 )
 
 
