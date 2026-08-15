@@ -90,7 +90,24 @@
       "Bash(taskkill //PID 114364 //F)",
       "Bash(grep -E \"^\\\\[B5\\\\]\" \"C:\\\\Users\\\\alexe\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--GitHub-Pump2\\\\19efb3c3-a0ae-40d2-bea9-fa8da380b64c\\\\tasks\\\\bljeo0e7r.output\")",
       "Bash(PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python -u scripts/run/phase_b_cause_weibull.py 200)",
-      "Bash(PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python scripts/run/phase_b_report.py)"
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python scripts/run/phase_b_report.py)",
+      "Bash(PYTHONUTF8=1 python scripts/build_project_map.py*)",
+      "Bash(python scripts/build_project_map.py*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && PYTHONUTF8=1 python scripts/build_project_map.py 2>/dev/null || true",
+            "timeout": 30,
+            "suppressOutput": true,
+            "statusMessage": "Refreshing project map"
+          }
+        ]
+      }
     ]
   }
 }

@@ -24,6 +24,11 @@ results/
 temp/
 catboost_info/
 
+# Scratch left at the repo root by ad-hoc runs: caches of intermediate frames and
+# console logs of one-off launches. Neither is an input or an output of anything.
+/*.log
+/.tmp_*.pkl
+
 # Archive of legacy artifacts and unrelated sub-projects.
 archive/
 
