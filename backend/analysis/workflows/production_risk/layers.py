@@ -14,6 +14,7 @@ from analysis.workflows.production_risk.crosswalk import (
     EspSource,
     PlanData,
     map_model_field_from_well,
+    resolve_qnominal,
 )
 from analysis.workflows.production_risk.survival import (
     HazardLayer,
@@ -21,8 +22,12 @@ from analysis.workflows.production_risk.survival import (
     WellState,
     compress_age_pmf,
     current_pump_p_fail,
+    current_pump_p_fail_monthly,
+    kpod_hazard_theta,
     project_well,
+    ql_hazard_theta,
     scenario_params,
+    uncertainty_hazard_theta,
     weighted_age_mean,
 )
 
@@ -37,6 +42,9 @@ def _gtm_info(gtm: pd.DataFrame, forecast_start: date) -> dict[str, dict]:
         first_date = dates.iloc[0] if not dates.empty else pd.NaT
         info[str(code)] = {
             "first_gtm_date": first_date if pd.notna(first_date) else None,
+            # Every planned ГТМ date, not just the first: each one swaps the pump
+            # and so resets its age (see project_well's gtm_reset_months).
+            "gtm_dates": tuple(pd.Timestamp(d) for d in dates),
             "is_esp": bool(grp["is_esp"].fillna(False).any()),
             "event_90d_flag": bool(((dates >= pd.Timestamp(forecast_start)) & (dates <= horizon_90)).any()),
         }
@@ -126,7 +134,7 @@ def _impute_age_pmf(
     return {0: 1.0}, "imputed_empty", "low"
 
 
-def _well_arrays(plan: PlanData, wid: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _well_arrays(plan: PlanData, wid: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     fwd = plan.fwd_months
     oil = plan.oil_volume.loc[wid, fwd].to_numpy(dtype=float) if wid in plan.oil_volume.index else np.zeros(len(fwd))
     liq = (
@@ -134,9 +142,14 @@ def _well_arrays(plan: PlanData, wid: str) -> tuple[np.ndarray, np.ndarray, np.n
         if wid in plan.liquid_volume.index
         else np.zeros(len(fwd))
     )
+    water_rate = (
+        plan.produced_water_rate.loc[wid, fwd].to_numpy(dtype=float)
+        if hasattr(plan, "produced_water_rate") and wid in plan.produced_water_rate.index
+        else np.zeros(len(fwd))
+    )
     op = plan.op_days.loc[wid, fwd].to_numpy(dtype=float) if wid in plan.op_days.index else np.zeros(len(fwd))
     cal = plan.cal_days.loc[fwd].to_numpy(dtype=float)
-    return oil, liq, op, cal
+    return oil, liq, water_rate, op, cal
 
 
 def _apply_time_map_idle_exposure(
@@ -194,7 +207,7 @@ def build_well_states(
     current_status = current_status or {}
     for wid in plan.producers:
         meta = plan.producer_meta.loc[wid]
-        oil, liq, op, cal = _well_arrays(plan, wid)
+        oil, liq, water_rate, op, cal = _well_arrays(plan, wid)
         gtm_row = gtm_info.get(wid, {})
         st = esp_source.states_by_well.get(wid)
         tr_status = current_status.get(wid)
@@ -308,11 +321,13 @@ def build_well_states(
                 include_primary=include_primary,
                 oil_volume=oil,
                 liquid_volume=liq,
+                water_rate_m3d=water_rate,
                 op_days=op_for_hazard,
                 cal_days=cal,
                 first_active_month=meta.get("first_active_month"),
                 first_gtm_date=first_gtm_date,
                 event_90d_flag=event_90d_flag,
+                gtm_dates=tuple(gtm_row.get("gtm_dates", ())),
             )
         )
         audit_rows.append(
@@ -327,6 +342,8 @@ def build_well_states(
                 "stratum": stratum,
                 "planned_oil_t": float(meta.get("planned_oil_t", 0.0)),
                 "planned_liquid_m3": float(meta.get("planned_liquid_m3", 0.0)),
+                "planned_produced_water_m3": float(meta.get("planned_produced_water_m3", 0.0)),
+                "produced_water_positive_months": int(meta.get("produced_water_positive_months", 0)),
                 "first_active_month": meta.get("first_active_month"),
                 "age_source": age_source,
                 "age_mean": round(age_mean, 1),
@@ -397,6 +414,24 @@ def _planned_oil_first_90_calendar(well: WellState) -> float:
     return total
 
 
+def _gtm_reset_months(well: WellState, month_index: dict[str, int]) -> dict[int, float]:
+    """Month index -> share of pump-age mass a planned ГТМ sends back to age 0.
+
+    Several ГТМ in one month compound: each independently replaces the pump with
+    probability ``GTM_PUMP_REPLACED_SHARE``, so the surviving un-reset share is
+    ``(1 - share) ** n``.
+    """
+    counts: dict[int, int] = {}
+    for stamp in well.gtm_dates:
+        if pd.isna(stamp):
+            continue
+        mi = month_index.get(pd.Timestamp(stamp).strftime("%Y-%m"))
+        if mi is not None:
+            counts[mi] = counts.get(mi, 0) + 1
+    share = float(C.GTM_PUMP_REPLACED_SHARE)
+    return {mi: 1.0 - (1.0 - share) ** n for mi, n in counts.items()}
+
+
 def run_projection(
     states: list[WellState],
     scenarios: tuple[C.ScenarioSpec, ...],
@@ -407,11 +442,14 @@ def run_projection(
     months: list[str],
     changeout_p90: float = C.CHANGEOUT_P90_THRESHOLD,
     downtime_override_days: int | None = None,
+    gtm_age_reset: bool = C.GTM_AGE_RESET_ENABLED,
 ) -> pd.DataFrame:
+    month_index = {month: idx for idx, month in enumerate(months)}
     recs: list[dict] = []
     for well in states:
         if not well.include_primary:
             continue
+        gtm_reset_months = _gtm_reset_months(well, month_index) if gtm_age_reset else None
         oil_per_op = np.divide(
             well.oil_volume,
             well.op_days,
@@ -424,10 +462,36 @@ def run_projection(
             out=np.zeros_like(well.liquid_volume, dtype=float),
             where=well.op_days > 0,
         )
+        water_rate = (
+            np.asarray(well.water_rate_m3d, dtype=float)
+            if well.water_rate_m3d is not None
+            else np.zeros_like(well.op_days, dtype=float)
+        )
+        liquid_rate = liq_per_op
+        log_ql_monthly = np.log1p(np.clip(liquid_rate, 0.0, None))
+        qnominal = resolve_qnominal(well.code, well.model_field)
+        kpod_monthly = (
+            np.divide(
+                liquid_rate,
+                float(qnominal),
+                out=np.full_like(liquid_rate, np.nan, dtype=float),
+                where=np.isfinite(float(qnominal)) and float(qnominal) > 0.0,
+            )
+            if qnominal is not None
+            else np.full_like(liquid_rate, np.nan, dtype=float)
+        )
+        kpod_field = _report_field_code(well.plan_field, well.model_field)
         op_90 = _opdays_first_90_calendar(well)
         oil_90 = _planned_oil_first_90_calendar(well)
         for spec in scenarios:
             params, theta = scenario_params(well.params, well.covariates, hazard, spec.hazard_mode)
+            use_ql_hazard = bool(spec.hazard_mode == "stress" and C.QL_HAZARD_ENABLED)
+            use_kpod_hazard = bool(spec.hazard_mode == "stress" and C.KPOD_HAZARD_ENABLED and qnominal is not None)
+            use_uncertainty_hazard = bool(
+                spec.hazard_mode == "stress"
+                and C.UNCERTAINTY_HAZARD_ENABLED
+                and well.state_label in C.UNCERTAINTY_HAZARD_APPLY_TO
+            )
             downtime = _downtime_days(
                 well.model_field,
                 global_downtime,
@@ -435,12 +499,66 @@ def run_projection(
                 spec.downtime_key,
                 override_days=downtime_override_days,
             )
-            failures, lost_op_days = project_well(well, params, downtime, model)
+            failures, lost_op_days = project_well(
+                well,
+                params,
+                downtime,
+                model,
+                log_ql_monthly=log_ql_monthly if use_ql_hazard else None,
+                kpod_monthly=kpod_monthly if use_kpod_hazard else None,
+                model_field=well.model_field,
+                kpod_field=kpod_field,
+                uncertainty_state_label=well.state_label if use_uncertainty_hazard else None,
+                uncertainty_field=kpod_field,
+                gtm_reset_months=gtm_reset_months,
+            )
             oil_loss = lost_op_days * oil_per_op
             liq_loss = lost_op_days * liq_per_op
-            p90 = current_pump_p_fail(well.age_pmf, params, op_90, model)
+            if use_ql_hazard or use_kpod_hazard or use_uncertainty_hazard:
+                p90 = current_pump_p_fail_monthly(
+                    well.age_pmf,
+                    params,
+                    well.op_days,
+                    well.cal_days,
+                    model,
+                    horizon_calendar_days=90,
+                    log_ql_monthly=log_ql_monthly if use_ql_hazard else None,
+                    kpod_monthly=kpod_monthly if use_kpod_hazard else None,
+                    model_field=well.model_field,
+                    kpod_field=kpod_field,
+                    uncertainty_state_label=well.state_label if use_uncertainty_hazard else None,
+                    uncertainty_field=kpod_field,
+                )
+            else:
+                p90 = current_pump_p_fail(well.age_pmf, params, op_90, model)
             evar_90 = p90 * oil_90
             for mi, month in enumerate(months):
+                theta_ql = 1.0
+                theta_kpod = 1.0
+                theta_uncertainty = 1.0
+                if use_ql_hazard and well.age_pmf:
+                    theta_ql = float(
+                        sum(
+                            float(weight)
+                            * float(ql_hazard_theta(float(log_ql_monthly[mi]), well.model_field, float(age)))
+                            for age, weight in well.age_pmf.items()
+                        )
+                    )
+                if use_kpod_hazard and well.age_pmf:
+                    theta_kpod = float(
+                        sum(
+                            float(weight) * float(kpod_hazard_theta(float(kpod_monthly[mi]), float(age), kpod_field))
+                            for age, weight in well.age_pmf.items()
+                        )
+                    )
+                if use_uncertainty_hazard and well.age_pmf:
+                    theta_uncertainty = float(
+                        sum(
+                            float(weight)
+                            * float(uncertainty_hazard_theta(float(age), well.state_label, kpod_field))
+                            for age, weight in well.age_pmf.items()
+                        )
+                    )
                 recs.append(
                     {
                         "scenario": spec.scenario_id,
@@ -464,6 +582,10 @@ def run_projection(
                         "month": month,
                         "planned_oil_t": float(well.oil_volume[mi]),
                         "planned_liquid_m3": float(well.liquid_volume[mi]),
+                        "planned_ql_m3d": float(liquid_rate[mi]),
+                        "planned_qnom_m3d": float(qnominal) if qnominal is not None else np.nan,
+                        "planned_kpod_raw": float(kpod_monthly[mi]) if np.isfinite(kpod_monthly[mi]) else np.nan,
+                        "planned_qw_m3d": float(water_rate[mi]),
                         "planned_op_days": float(well.op_days[mi]),
                         "calendar_days": float(well.cal_days[mi]),
                         "expected_failures": float(failures[mi]),
@@ -472,7 +594,12 @@ def run_projection(
                         "liquid_loss_m3": float(liq_loss[mi]),
                         "p_fail_90d": float(p90),
                         "exp_value_at_risk_90d_t": float(evar_90),
-                        "theta": float(theta),
+                        "theta": float(theta * theta_ql * theta_kpod * theta_uncertainty),
+                        "theta_static": float(theta),
+                        "theta_ql": float(theta_ql),
+                        "theta_kpod": float(theta_kpod),
+                        "theta_uncertainty": float(theta_uncertainty),
+                        "theta_qw": 1.0,
                         "downtime_days": int(downtime),
                         "flag_changeout": "CHANGE-OUT" if (p90 >= changeout_p90 and oil_90 > 0) else "",
                     }
@@ -511,6 +638,86 @@ def _plan_field_monthly_totals(plan: PlanData) -> pd.DataFrame:
     return pd.DataFrame(rows).groupby(["plan_field", "month"], as_index=False).sum()
 
 
+def _report_field_code(plan_field: str, model_field: str | None) -> str:
+    text = str(plan_field or "").casefold()
+    if "большетир" in text:
+        return "Bt"
+    return str(model_field or "")
+
+
+def kpod_by_field_monthly(
+    plan: PlanData,
+    forecast_start: date,
+    equipment_big_path=None,
+) -> pd.DataFrame:
+    """Monthly average raw Kpod by reporting/plan field across historical and forecast months."""
+    rows: list[dict] = []
+    forecast_month = forecast_start.strftime("%Y-%m")
+    for wid in plan.liquid_volume.index:
+        meta = plan.producer_meta.loc[wid] if wid in plan.producer_meta.index else {}
+        field = str(meta.get("plan_field", "") or "")
+        if not field:
+            continue
+        model_field = map_model_field_from_well(str(wid))
+        report_field = _report_field_code(field, model_field)
+        display_field = f"{report_field} - {field}" if report_field else field
+        qnom = resolve_qnominal(str(wid), model_field, equipment_big_path)
+        if qnom is None or not np.isfinite(float(qnom)) or float(qnom) <= 0.0:
+            continue
+        for month in plan.months:
+            try:
+                oil = float(plan.oil_volume.at[wid, month])
+                liq = float(plan.liquid_volume.at[wid, month])
+                op = float(plan.op_days.at[wid, month])
+            except Exception:
+                continue
+            if not np.isfinite(liq) or not np.isfinite(op) or liq <= 0.0 or op <= 0.0:
+                continue
+            ql = liq / op
+            qo = oil / op if np.isfinite(oil) and oil > 0.0 else np.nan
+            rows.append(
+                {
+                    "report_field": report_field,
+                    "plan_field": field,
+                    "field_label": display_field,
+                    "month": month,
+                    "period_type": "historical" if month < forecast_month else "forecast",
+                    "kpod_raw": ql / float(qnom),
+                    "oil_rate_td": qo,
+                    "ql_m3d": ql,
+                    "qnom_m3d": float(qnom),
+                    "wid": str(wid),
+                }
+            )
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "plan_field",
+                "report_field",
+                "field_label",
+                "month",
+                "period_type",
+                "mean_planned_kpod_raw",
+                "mean_planned_oil_rate_td",
+                "mean_planned_ql_m3d",
+                "mean_planned_qnom_m3d",
+                "wells_with_kpod",
+            ]
+        )
+    df = pd.DataFrame(rows)
+    return (
+        df.groupby(["report_field", "plan_field", "field_label", "month", "period_type"], as_index=False)
+        .agg(
+            mean_planned_kpod_raw=("kpod_raw", "mean"),
+            mean_planned_oil_rate_td=("oil_rate_td", "mean"),
+            mean_planned_ql_m3d=("ql_m3d", "mean"),
+            mean_planned_qnom_m3d=("qnom_m3d", "mean"),
+            wells_with_kpod=("wid", "nunique"),
+        )
+        .sort_values(["plan_field", "month"])
+    )
+
+
 def production_at_risk(proj: pd.DataFrame, plan: PlanData) -> dict[str, pd.DataFrame]:
     total_monthly = _plan_monthly_totals(plan)
     covered_monthly = (
@@ -518,6 +725,9 @@ def production_at_risk(proj: pd.DataFrame, plan: PlanData) -> dict[str, pd.DataF
         .agg(
             covered_planned_oil_t=("planned_oil_t", "sum"),
             covered_planned_liquid_m3=("planned_liquid_m3", "sum"),
+            mean_planned_ql_m3d=("planned_ql_m3d", "mean"),
+            mean_planned_kpod_raw=("planned_kpod_raw", "mean"),
+            mean_planned_qw_m3d=("planned_qw_m3d", "mean"),
             expected_failures=("expected_failures", "sum"),
             expected_lost_op_days=("expected_lost_op_days", "sum"),
             oil_loss_t=("oil_loss_t", "sum"),
@@ -567,6 +777,10 @@ def production_at_risk(proj: pd.DataFrame, plan: PlanData) -> dict[str, pd.DataF
         .agg(
             planned_oil_t=("planned_oil_t", "sum"),
             planned_liquid_m3=("planned_liquid_m3", "sum"),
+            mean_planned_ql_m3d=("planned_ql_m3d", "mean"),
+            mean_planned_qnom_m3d=("planned_qnom_m3d", "mean"),
+            mean_planned_kpod_raw=("planned_kpod_raw", "mean"),
+            mean_planned_qw_m3d=("planned_qw_m3d", "mean"),
             expected_failures=("expected_failures", "sum"),
             expected_lost_op_days=("expected_lost_op_days", "sum"),
             oil_loss_t=("oil_loss_t", "sum"),
@@ -575,6 +789,11 @@ def production_at_risk(proj: pd.DataFrame, plan: PlanData) -> dict[str, pd.DataF
             exp_value_at_risk_90d_t=("exp_value_at_risk_90d_t", "max"),
             downtime_days=("downtime_days", "max"),
             theta=("theta", "max"),
+            theta_static=("theta_static", "max"),
+            theta_ql=("theta_ql", "max"),
+            theta_kpod=("theta_kpod", "max"),
+            theta_uncertainty=("theta_uncertainty", "max"),
+            theta_qw=("theta_qw", "max"),
             flag_changeout=("flag_changeout", "max"),
         )
         .sort_values(["scenario", "oil_loss_t"], ascending=[True, False])
@@ -588,6 +807,9 @@ def production_at_risk(proj: pd.DataFrame, plan: PlanData) -> dict[str, pd.DataF
         .agg(
             covered_planned_oil_t=("planned_oil_t", "sum"),
             covered_planned_liquid_m3=("planned_liquid_m3", "sum"),
+            mean_planned_ql_m3d=("planned_ql_m3d", "mean"),
+            mean_planned_kpod_raw=("planned_kpod_raw", "mean"),
+            mean_planned_qw_m3d=("planned_qw_m3d", "mean"),
             expected_failures=("expected_failures", "sum"),
             expected_lost_op_days=("expected_lost_op_days", "sum"),
             oil_loss_t=("oil_loss_t", "sum"),
@@ -604,7 +826,7 @@ def production_at_risk(proj: pd.DataFrame, plan: PlanData) -> dict[str, pd.DataF
     by_field["risk_adjusted_total_liquid_m3"] = by_field["total_planned_liquid_m3"] - by_field["liquid_loss_m3"]
     by_field["risk_pct_total_oil"] = 100.0 * by_field["oil_loss_t"] / by_field["total_planned_oil_t"].replace(0, np.nan)
 
-    return {"monthly": covered_monthly, "by_well": by_well, "by_field": by_field}
+    return {"monthly": covered_monthly, "by_well": by_well, "by_field": by_field, "kpod_by_field": pd.DataFrame()}
 
 
 def workover_load(proj: pd.DataFrame, gtm: pd.DataFrame, fwd_months: list[str]) -> pd.DataFrame:
@@ -645,6 +867,8 @@ def changeout(by_well: pd.DataFrame) -> pd.DataFrame:
         "confidence",
         "age_source",
         "age_mean",
+        "mean_planned_ql_m3d",
+        "mean_planned_qw_m3d",
         "event_90d_flag",
         "first_gtm_date",
     ]

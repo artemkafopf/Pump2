@@ -37,7 +37,7 @@ replay keeps the legacy `uptime_factor`/linear interpolation branch. If a bundle
 - forward projection adds reduced idle exposure in zero-runtime plan months, with audit
   columns `time_map_idle_op_days_added` and `time_map_idle_source`.
 
-## Time-map diagnostics
+## Time-map diagnostics — mostly a null lever
 
 `time_map_reconstruction_metrics.csv`:
 
@@ -47,17 +47,26 @@ replay keeps the legacy `uptime_factor`/linear interpolation branch. If a bundle
 | holdout | age_season_map_unscaled | **7.82** | 22.2% |
 | holdout | age_season_map_scaled_to_run_nno | 14.00 | **0.0%** |
 
-Interpretation: the age/season map improves monthly placement vs the scalar, but raw
-daily tech-regime totals do not reconstruct source `ННО` below the 10% target. The
-deployed historical replay therefore treats source `ННО` as the clock ground truth and
-uses the map for **placement weights**, scaling monthly weights back to known run `ННО`.
-That satisfies total-life consistency by construction for runs with `ННО`; unscaled map
-rows remain the fallback for intervals without total op-days.
+Interpretation: this is mostly a **negative Workstream-B result**. The age/season map
+improves monthly placement only modestly vs the scalar (`8.79 → 7.82` MAE, about 11%),
+while raw daily-tech-regime totals reconstruct source `ННО` worse (`18.8% → 22.2%`).
+The global mapped uptime (`~0.757`) is very close to the legacy scalar (`~0.745`), so the
+old constant `uptime_factor` was not a material over-prediction lever.
+
+The deployed historical replay therefore treats source `ННО` as the clock ground truth
+and uses the map for **placement weights**, scaling monthly weights back to known run
+`ННО`. That gives 0% total-life error by construction for runs with `ННО`; it is not
+evidence that the map predicts total operating life. Unscaled map rows remain the fallback
+for intervals without total op-days.
 
 This is the key B1 reconciliation: `ННО`/A `tte` remains the model clock; daily
 tech-regime is used for within-run calendar placement, not for replacing run totals.
 
-## Idle-month decision
+Methodology caveat: the reported "holdout" was split after fitting the map, so it is not
+a true out-of-sample holdout. D must rerun this with a run/well split applied before map
+fitting if the map is considered for promotion.
+
+## Idle-month decision — provisional, Mc not cleared
 
 `idle_hazard_decision.csv` shows idle hazard is not close to zero. Focus fields:
 
@@ -68,10 +77,17 @@ tech-regime is used for within-run calendar placement, not for replacing run tot
 | Верхнетирский УН | 28 | 195 | 0.571 | fit idle hazard |
 | GLOBAL | 102 | 578 | 0.688 | fit idle hazard |
 
-Decision: **do not attribute idle failures wholesale to the last producing month**.
-Use a fitted idle-hazard fraction in replay/projection. Мирнинский is capped at 1.0
-because its empirical idle hazard is slightly above producing-month hazard on the A
-population.
+Provisional decision: idle failures are not zero, but this table does **not** fully
+disambiguate real idle hazard from failure-date/pull-date misdating. A pump that fails
+mid-month can appear as non-producing in the plan for that same month, mechanically
+inflating the idle bucket. Мирнинский is the risky case: its raw idle/producing ratio is
+above 1 and is capped to 1.0, exactly the pattern expected from misdated pull-months.
+
+D must not enable the fitted idle fraction for Мирнинский until a last-producing-month
+re-attribution check is run. Historically, known-`ННО` intervals only redistribute fixed
+op-days across months, so idle fraction changes monthly shape more than total level; the
+larger level effect is forward projection in planned-idle months, where Mc idle fraction
+= 1.0 could increase predictions and worsen over-prediction.
 
 ## Files
 
@@ -83,7 +99,10 @@ population.
 
 ## Caveat for D
 
-The strict B4 target is only met in the deployed `scaled_to_run_nno` historical mode.
-The unscaled daily-tech-regime map improves monthly placement but misses source `ННО`
-by ~22% on holdout. D should validate fact/model with the scaled historical replay and
-watch whether added idle exposure over-corrects Mc.
+Treat the time map as placement-only and near-null; keep A `ННО`/`tte` as the model
+clock. Do not promote the Mc idle fraction without the misdating disambiguation. Ya/Vt
+idle fractions can be tested as sensitivity, but D acceptance should compare:
+
+1. A baseline with legacy scalar exposure;
+2. A + placement-only time map (known `ННО` scaled);
+3. A + placement map + idle fractions, with Mc separately gated by re-attribution.

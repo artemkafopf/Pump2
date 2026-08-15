@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -21,7 +22,11 @@ _COLS_RU = {
     "scenario_label": "Сценарий (RU)",
     "scenario_primary": "Основной сценарий",
     "month": "Месяц",
+    "period_type": "Период",
+    "report_field": "Поле отчета",
     "plan_field": "Месторождение",
+    "field_label": "Поле/месторождение",
+    "risk_model_field": "Поле риск-модели",
     "wid": "Скважина",
     "raw_id": "Well_ID",
     "model_field": "Поле модели",
@@ -39,6 +44,9 @@ _COLS_RU = {
     "first_gtm_date": "Первая дата ГТМ/КРС",
     "planned_oil_t": "План нефти, т",
     "planned_liquid_m3": "План жидкости, м3",
+    "planned_ql_m3d": "План Ql, м3/сут",
+    "planned_qnom_m3d": "Qnom, м3/сут",
+    "planned_kpod_raw": "Kpod raw, Ql/Qnom",
     "planned_op_days": "План работы, сут",
     "calendar_days": "Календарных дней",
     "expected_failures": "Ожид. отказов УЭЦН",
@@ -48,6 +56,9 @@ _COLS_RU = {
     "p_fail_90d": "P(отказ 90д)",
     "exp_value_at_risk_90d_t": "Добыча под риском 90д, т",
     "theta": "Stress-множитель θ",
+    "theta_ql": "Ql-множитель θ",
+    "theta_kpod": "Kpod-множитель θ",
+    "theta_uncertainty": "Uncertainty-множитель θ",
     "downtime_days": "Ремонт, дней",
     "flag_changeout": "Флаг замены",
     "covered_planned_oil_t": "Охваченный план нефти, т",
@@ -71,6 +82,11 @@ _COLS_RU = {
     "registry_oil_positive_months": "Реестр: нефть, мес",
     "registry_liquid_positive_months": "Реестр: жидкость, мес",
     "summary_positive_months": "Сводные данные: мес",
+    "mean_planned_ql_m3d": "Средний Ql, м3/сут",
+    "mean_planned_oil_rate_td": "Средний Qo, т/сут",
+    "mean_planned_qnom_m3d": "Средний Qnom, м3/сут",
+    "mean_planned_kpod_raw": "Средний Kpod raw",
+    "wells_with_kpod": "Скважин с Kpod",
     f"p_fail_90d_{C.PRIMARY_SCENARIO_ID}": "P(отказ 90д), база/П50",
     f"exp_value_at_risk_90d_t_{C.PRIMARY_SCENARIO_ID}": "Добыча под риском 90д, база/П50, т",
     f"flag_changeout_{C.PRIMARY_SCENARIO_ID}": "Флаг замены, база/П50",
@@ -152,6 +168,7 @@ def _summary_sheet(ws, monthly: pd.DataFrame, audit: pd.DataFrame) -> None:
     ws["A13"].font = Font(bold=True)
     ws["A14"] = (
         "Основной сценарий использует только валидированную стратифицированную baseline-модель. "
+        "Прогноз добычи использует renewal-симуляцию с downtime, потерями нефти и нагрузкой ремонтов. "
         "Stress-сценарий помечен как чувствительность и не является OOS-validated прогнозом."
     )
     ws["A14"].alignment = Alignment(wrap_text=True)
@@ -166,15 +183,82 @@ def _method_sheet(ws) -> None:
     lines = [
         "1. База плана: только master-файл ПП; ДФ_04 используется как контекст ГТМ/КРС и ЭЦН-признак.",
         "2. Горизонт прогноза: июль 2026 — декабрь 2027.",
-        "3. Основной риск: валидированная модель stratum + operating age из esp_models.csv.",
-        "4. Stress-сценарий: direct hazard overlay из esp_cox_coeffs.csv, только как sensitivity.",
-        "5. Часы модели: operating days (ttf_mix), а не календарные дни.",
-        "6. Потери добычи считаются через ожидаемые потерянные operating days и плановые месячные объемы.",
-        "7. Для скважин без подтвержденного ЭЦН-следа основной расчет консервативно не применяется.",
+        "3. Валидационный график интенсивности: условный месячный риск для парка, активного на начало месяца; одинаковая логика до и после forecast_start.",
+        "4. Прогноз/прогнозис: renewal-симуляция отказов с downtime, возвратом скважины после ремонта, потерями нефти и нагрузкой ремонтов.",
+        "5. Калибровка: фиксированные прозрачные коэффициенты, заданные в коде; при запуске не пересчитываются по факту.",
+        "6. Основной риск: валидированная модель stratum + operating age из esp_models.csv.",
+        "7. Stress-сценарий: direct hazard overlay из esp_cox_coeffs.csv, Ql/Kpod и new-launch uncertainty hazard, только как sensitivity.",
+        "8. Часы модели: operating days (ttf_mix), а не календарные дни.",
+        "9. Потери добычи считаются через ожидаемые потерянные operating days и плановые месячные объемы.",
+        "10. Для скважин без подтвержденного ЭЦН-следа основной расчет консервативно не применяется.",
     ]
     for idx, line in enumerate(lines, start=3):
         ws.cell(row=idx, column=1, value=line)
     ws.column_dimensions["A"].width = 110
+
+
+def _kpod_sheet(ws, kpod_by_field: pd.DataFrame) -> None:
+    ws["A1"] = "Средний Kpod по месторождениям"
+    ws["A1"].font = _TITLE_FONT
+    ws["A2"] = "Raw Kpod = Ql / Qnominal. История и прогноз; это не freq-normalized Kpod."
+    ws["A2"].font = _NOTE_FONT
+    if kpod_by_field is None or kpod_by_field.empty:
+        ws["A4"] = "Нет данных Kpod."
+        return
+
+    def _write_pivot_section(value_col: str, title: str, y_title: str, header_row: int) -> int:
+        field_col = "field_label" if "field_label" in kpod_by_field.columns else "plan_field"
+        pivot = (
+            kpod_by_field.pivot_table(
+                index="month",
+                columns=field_col,
+                values=value_col,
+                aggfunc="first",
+            )
+            .sort_index()
+        )
+        fields = [str(c) for c in pivot.columns]
+        ws.cell(row=header_row - 1, column=1, value=title).font = Font(bold=True)
+        ws.cell(row=header_row, column=1, value="Месяц").fill = _HDR_FILL
+        ws.cell(row=header_row, column=1).font = _HDR_FONT
+        for col_idx, field in enumerate(fields, start=2):
+            cell = ws.cell(row=header_row, column=col_idx, value=field)
+            cell.fill = _HDR_FILL
+            cell.font = _HDR_FONT
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for row_idx, month in enumerate(pivot.index, start=header_row + 1):
+            ws.cell(row=row_idx, column=1, value=str(month))
+            for col_idx, field in enumerate(fields, start=2):
+                value = pivot.at[month, field]
+                ws.cell(row=row_idx, column=col_idx, value=None if pd.isna(value) else round(float(value), 3))
+
+        data = Reference(ws, min_col=2, max_col=1 + len(fields), min_row=header_row, max_row=header_row + len(pivot))
+        cats = Reference(ws, min_col=1, min_row=header_row + 1, max_row=header_row + len(pivot))
+        chart = LineChart()
+        chart.title = title
+        chart.y_axis.title = y_title
+        chart.x_axis.title = "Месяц"
+        chart.height = 12
+        chart.width = 28
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(cats)
+        ws.add_chart(chart, f"A{header_row + len(pivot) + 3}")
+        return header_row + len(pivot) + 20
+
+    header_row = 4
+    next_row = _write_pivot_section("mean_planned_kpod_raw", "Средний Kpod по месторождениям", "Kpod raw", header_row)
+    if "mean_planned_ql_m3d" in kpod_by_field.columns:
+        next_row = _write_pivot_section("mean_planned_ql_m3d", "Средний дебит жидкости по скважинам", "Ql, м3/сут", next_row)
+    if "mean_planned_oil_rate_td" in kpod_by_field.columns:
+        _write_pivot_section("mean_planned_oil_rate_td", "Средний дебит нефти по скважинам", "Qo, т/сут", next_row)
+
+    field_col = "field_label" if "field_label" in kpod_by_field.columns else "plan_field"
+    fields = [str(c) for c in kpod_by_field[field_col].dropna().unique()]
+    ws.cell(row=header_row, column=1, value="Месяц").fill = _HDR_FILL
+    ws.freeze_panes = ws["B5"]
+    ws.column_dimensions["A"].width = 12
+    for col_idx in range(2, 2 + len(fields)):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 18
 
 
 def _save_workbook_unlocked(wb: Workbook, path: Path) -> Path:
@@ -209,6 +293,7 @@ def write(
         production_tables["by_field"],
         "Помесячная оценка по месторождениям",
     )
+    _kpod_sheet(wb.create_sheet("Kpod"), production_tables.get("kpod_by_field", pd.DataFrame()))
     primary_well = production_tables["by_well"].copy()
     if "scenario" in primary_well.columns:
         primary_well = primary_well[primary_well["scenario"] == C.PRIMARY_SCENARIO_ID]

@@ -27,7 +27,8 @@ FIXED_COLUMNS = [
     "Прогноз CatBoost",
     "Вероятностный прогноз",
     "Использовано",
-    "Факт ННО",
+    "Наработка факт",
+    "ОР",
     "ДебН, т/сут",
     "Дата активации",
 ]
@@ -145,11 +146,45 @@ def _planned_oil_rate(rows: pd.DataFrame) -> float | None:
 
 
 def _predicted_interval(rows: pd.DataFrame) -> float | None:
+    """Mean op-days per predicted failure — an ННО-style interval, NOT an МРП.
+
+    Only feeds the monthly chart aggregate, where averaging an interval is the
+    meaningful operation.  The per-well sheet column reports days-to-workover
+    instead (see :func:`_days_to_first_event`).
+    """
     expected = pd.to_numeric(rows["expected_failures"], errors="coerce").fillna(0.0).sum()
     op = pd.to_numeric(rows["planned_op_days"], errors="coerce").fillna(0.0).sum()
     if expected <= 0 or op <= 0:
         return None
-    return float(op / expected)
+    # Whole days: the sheet is read as a day count, and sub-day precision is far
+    # below what the monthly hazard projection can resolve.
+    return float(round(op / expected))
+
+
+def _days_to_first_event(event_dates: list[date], start: date) -> float | None:
+    """Days from the forecast start to this well's first predicted workover.
+
+    This is what the sheet's per-well column carries: the distance to the first
+    ``0`` in the well's row, i.e. remaining days to the workover the grid schedules.
+    It is a REMAINING life, deliberately not a total life — so it is not comparable
+    with «Факт ННО» (the current pump's age) and cannot contradict it.  Blank when
+    no workover is predicted inside the horizon.
+    """
+    if not event_dates:
+        return None
+    return float((min(event_dates) - start).days)
+
+
+def _projected_nno(age_now: float | None, days_to_workover: float | None) -> float | None:
+    """Прогнозная ННО = наработка сегодня + расстояние до подъёма.
+
+    Правило заказчика: колонка «Вероятностный прогноз» должна мерить ТО ЖЕ, что и
+    «Факт ННО» — полную наработку на момент подъёма, а не остаток до него.  Пустая,
+    если подъём не предсказан внутри горизонта или возраст неизвестен.
+    """
+    if days_to_workover is None or age_now is None:
+        return None
+    return float(round(float(age_now) + float(days_to_workover)))
 
 
 def _downtime_days(rows: pd.DataFrame) -> int:
@@ -202,12 +237,15 @@ def build(
                 statuses[date_index[item]] = 0
 
         predicted_nno = _predicted_interval(grp)
+        days_to_workover = _days_to_first_event(event_dates, dates[0])
         for event_date in event_dates:
             month_key = f"{event_date.year}-{event_date.month:02d}"
             bucket = monthly_summary.setdefault(month_key, {"total_nno": 0.0, "failure_count": 0})
             bucket["total_nno"] = float(bucket["total_nno"]) + float(predicted_nno or 0.0)
             bucket["failure_count"] = int(bucket["failure_count"]) + 1
 
+        age_now = float(state.age_mean) if state is not None and state.age_mean is not None else None
+        projected_nno = _projected_nno(age_now, days_to_workover)
         first_active = _first_active_date(grp, cfg.forecast_start)
         first_row = grp.sort_values("month").iloc[0]
         first_op = float(first_row.get("planned_op_days", 0.0) or 0.0)
@@ -220,8 +258,17 @@ def build(
                 "cluster_name": None,
                 "well_name": str(first_row.get("raw_id", wid) or wid),
                 "catboost_nno": None,
-                "probabilistic_nno": predicted_nno,
-                "predicted_nno": predicted_nno,
+                # «Вероятностный прогноз» — ПОЛНАЯ прогнозная наработка на отказ:
+                # возраст насоса сегодня + расстояние до первого предсказанного
+                # подъёма (первого 0 в строке).  Тот же смысл, что у «Факт ННО»
+                # (наработка), поэтому колонки сопоставимы и прогноз >= факта.
+                # Раньше здесь лежал ОСТАТОК (days_to_workover) — из-за этого
+                # «Факт ННО» сплошь превышал «Вероятностный прогноз» на работающих
+                # насосах: сравнивались наработка и остаток, разные величины.
+                "probabilistic_nno": projected_nno,
+                "predicted_nno": projected_nno,
+                "days_to_workover": days_to_workover,
+                "mean_op_days_per_failure": predicted_nno,
                 "used_prediction_source": "survival",
                 "downtime_days": downtime_days,
                 "current_status": state.current_status if state is not None else None,
@@ -305,6 +352,12 @@ def write_excel(path: Path, payload: dict, failure_rate=None) -> Path:
             statuses.extend([1] * (date_count - len(statuses)))
         elif len(statuses) > date_count:
             statuses = statuses[:date_count]
+        prob = row.get("probabilistic_nno")
+        fact = row.get("actual_nno")
+        # ОР = остаточный ресурс = Вероятностный прогноз − Наработка факт. У свежего
+        # насоса наработка отсутствует (None) — считаем её нулём, тогда ОР = полный
+        # прогноз. Если нет и прогноза (неработающая скважина-заглушка) — ОР пуст.
+        residual = (prob - (fact or 0)) if prob is not None else None
         sheet.append(
             [
                 row.get("category"),
@@ -312,9 +365,10 @@ def write_excel(path: Path, payload: dict, failure_rate=None) -> Path:
                 row.get("cluster_name"),
                 row.get("well_name"),
                 row.get("catboost_nno"),
-                row.get("probabilistic_nno"),
+                prob,
                 row.get("used_prediction_source"),
-                row.get("actual_nno"),
+                fact,
+                residual,
                 row.get("oil_rate"),
                 row.get("activation_date"),
                 *statuses,

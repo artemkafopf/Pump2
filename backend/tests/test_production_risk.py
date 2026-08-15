@@ -21,7 +21,11 @@ from analysis.workflows.production_risk.survival import (
     StrataModel,
     WellState,
     current_pump_p_fail,
+    current_pump_p_fail_monthly,
+    kpod_hazard_theta,
     project_well,
+    ql_hazard_theta,
+    uncertainty_hazard_theta,
 )
 
 
@@ -68,12 +72,16 @@ def _make_plan_workbook(path: Path) -> None:
 
     summary_rows = [
         ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча нефти", "т", "", "Ya_001", "1", 310.0],
+        ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча нефти м3", "м3", "", "Ya_001", "1", 310.0],
         ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча жидкости", "м3", "", "Ya_001", "1", 620.0],
+        ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча воды (ППД)", "м3", "", "Ya_001", "1", 999.0],
         ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Отработанное время", "дн", "", "Ya_001", "1", 40.0],
     ]
     registry_rows = [
         ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча нефти", "т/сут", "", "Ya_001", "1", 10.0],
+        ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча нефти м3", "м3/сут", "", "Ya_001", "1", 10.0],
         ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча жидкости", "м3/сут", "", "Ya_001", "1", 20.0],
+        ["Ярактинское НГКМ", "УН-Яракта", "", "", "", "", "", "", "Добыча воды (ППД)", "м3/сут", "", "Ya_001", "1", 999.0],
     ]
     for row_idx, row in enumerate(summary_rows, start=4):
         for col_idx, value in enumerate(row, start=1):
@@ -192,6 +200,424 @@ def test_project_well_deterministic_outputs_are_bounded():
     assert 0.0 <= lost[0] <= 31.0
 
 
+def test_project_well_ql_hazard_changes_failure_path(monkeypatch):
+    monkeypatch.setattr(C, "QL_HAZARD_ENABLED", True)  # dial off by default; test the mechanism
+    model = StrataModel()
+    params, _ = model.resolve("Ya", "nonsour", "brt")
+    well = WellState(
+        code="Ya_003",
+        raw_id="Ya_003",
+        plan_field="Ярактинское НГКМ",
+        model_field="Ya",
+        stratum="Ya_nonsour_brt",
+        params=params,
+        age_pmf={100: 1.0},
+        age_source="history_running",
+        age_mean=100.0,
+        state_label="exact_active",
+        scope_label="included",
+        confidence="high",
+        contractor_group="brt",
+        contractor_source="exact_history",
+        sour_class="nonsour",
+        sour_source="exact_history",
+        covariates={},
+        cov_source="none",
+        current_status=None,
+        current_in_operation=None,
+        current_status_date=None,
+        include_primary=True,
+        oil_volume=np.array([310.0]),
+        liquid_volume=np.array([620.0]),
+        op_days=np.array([31.0]),
+        cal_days=np.array([31.0]),
+        first_active_month="2026-07",
+        first_gtm_date=None,
+        event_90d_flag=False,
+    )
+    base, _ = project_well(well, params, 16, model)
+    high_ql, _ = project_well(
+        well,
+        params,
+        16,
+        model,
+        log_ql_monthly=np.array([math.log1p(400.0)]),
+        model_field="Ya",
+    )
+    assert not np.allclose(base, high_ql)
+
+
+def test_ql_hazard_theta_identities_and_direction(monkeypatch):
+    monkeypatch.setattr(C, "QL_HAZARD_ENABLED", True)  # dial off by default; test the mechanism
+    field = "Ya"
+    ref = C.QL_HAZARD_FIELD_REF_LOG[field]
+    ages = np.array([1.0, 100.0, 533.0, 1000.0])
+
+    # at the field reference Ql (z=0) the dial is neutral at every age; NaN is neutral too
+    assert np.allclose(ql_hazard_theta(ref, field, ages), 1.0)
+    assert ql_hazard_theta(ref, field, 100.0) == 1.0
+    assert ql_hazard_theta(float("nan"), field, 100.0) == 1.0
+    assert np.allclose(ql_hazard_theta(float("nan"), field, ages), np.ones_like(ages))
+
+    # capped at +/- log(5)
+    clipped = ql_hazard_theta(ref + 10.0, field, ages)
+    at_cap = ql_hazard_theta(ref + C.QL_HAZARD_CAP_LOG_RATIO, field, ages)
+    assert np.allclose(clipped, at_cap)
+
+    # sign-corrected plain PH (gamma=0): higher liquid rate raises hazard at EVERY age,
+    # lower liquid rate lowers it, and there is no age crossover (theta constant in age).
+    high_ql = ref + math.log(5.0)
+    low_ql = ref - math.log(5.0)
+    high = ql_hazard_theta(high_ql, field, ages)
+    low = ql_hazard_theta(low_ql, field, ages)
+    assert np.all(high > 1.0)
+    assert np.all(low < 1.0)
+    assert np.allclose(high, high[0])  # no age dependence when gamma == 0
+    assert math.isclose(ql_hazard_theta(high_ql, field, 100.0),
+                        math.exp(C.QL_HAZARD_CAP_LOG_RATIO * C.QL_HAZARD_BETA), rel_tol=1e-9)
+
+
+def test_kpod_hazard_theta_identities_caps_and_age_interaction():
+    ages = np.array([1.0, 100.0, 1000.0])
+    old = {
+        "enabled": C.KPOD_HAZARD_ENABLED,
+        "beta_under": C.KPOD_HAZARD_BETA_UNDER,
+        "gamma_under": C.KPOD_HAZARD_GAMMA_UNDER,
+        "gamma_over": C.KPOD_HAZARD_GAMMA_OVER,
+        "field_params": dict(C.KPOD_HAZARD_FIELD_PARAMS),
+    }
+    try:
+        C.KPOD_HAZARD_ENABLED = True
+        C.KPOD_HAZARD_BETA_UNDER = 0.5
+        C.KPOD_HAZARD_GAMMA_UNDER = 0.0
+        C.KPOD_HAZARD_GAMMA_OVER = 0.02
+        C.KPOD_HAZARD_FIELD_PARAMS = {}
+
+        assert np.allclose(kpod_hazard_theta(0.9, ages), 1.0)
+        assert kpod_hazard_theta(float("nan"), 100.0) == 1.0
+        assert np.all(kpod_hazard_theta(C.KPOD_HAZARD_K_HI + 0.1, ages) > 1.0)
+        assert np.all(kpod_hazard_theta(C.KPOD_HAZARD_K_LO - 0.1, ages) > 1.0)
+
+        clipped = kpod_hazard_theta(C.KPOD_HAZARD_K_HI + 100.0, ages)
+        at_cap = kpod_hazard_theta(C.KPOD_HAZARD_K_HI + C.KPOD_HAZARD_CAP_OVER, ages)
+        assert np.allclose(clipped, at_cap)
+
+        over = kpod_hazard_theta(C.KPOD_HAZARD_K_HI + 0.2, ages)
+        assert over[-1] > over[0]
+
+        C.KPOD_HAZARD_ENABLED = False
+        assert np.allclose(kpod_hazard_theta(C.KPOD_HAZARD_K_HI + 0.2, ages), 1.0)
+    finally:
+        C.KPOD_HAZARD_ENABLED = old["enabled"]
+        C.KPOD_HAZARD_BETA_UNDER = old["beta_under"]
+        C.KPOD_HAZARD_GAMMA_UNDER = old["gamma_under"]
+        C.KPOD_HAZARD_GAMMA_OVER = old["gamma_over"]
+        C.KPOD_HAZARD_FIELD_PARAMS = old["field_params"]
+
+
+def test_kpod_hazard_theta_uses_field_specific_overrides():
+    old_enabled = C.KPOD_HAZARD_ENABLED
+    old = dict(C.KPOD_HAZARD_FIELD_PARAMS)
+    try:
+        C.KPOD_HAZARD_ENABLED = True
+        C.KPOD_HAZARD_FIELD_PARAMS = {
+            "Bt": {
+                "k_hi": 1.0,
+                "beta_over": 2.0,
+                "cap_over": 1.0,
+            }
+        }
+        global_theta = kpod_hazard_theta(1.1, 100.0, "Vt")
+        bt_theta = kpod_hazard_theta(1.1, 100.0, "Bt")
+        assert math.isclose(global_theta, 1.0, rel_tol=1e-12)
+        assert bt_theta > 1.0
+    finally:
+        C.KPOD_HAZARD_ENABLED = old_enabled
+        C.KPOD_HAZARD_FIELD_PARAMS = old
+
+
+def test_uncertainty_hazard_theta_decays_and_is_state_gated():
+    old_enabled = C.UNCERTAINTY_HAZARD_ENABLED
+    old_apply = set(C.UNCERTAINTY_HAZARD_APPLY_TO)
+    old_field = dict(C.UNCERTAINTY_HAZARD_FIELD_PARAMS)
+    try:
+        C.UNCERTAINTY_HAZARD_ENABLED = True
+        C.UNCERTAINTY_HAZARD_APPLY_TO = {"new_plan_only"}
+        C.UNCERTAINTY_HAZARD_FIELD_PARAMS = {"Bt": {"u0": 0.5, "tau_days": 10.0, "cap": 1.4}}
+        ages = np.array([0.0, 10.0, 100.0])
+        theta = uncertainty_hazard_theta(ages, "new_plan_only", "Bt")
+        assert math.isclose(theta[0], 1.4, rel_tol=1e-12)  # capped below 1 + u0
+        assert theta[1] > theta[2] > 1.0
+        assert np.allclose(uncertainty_hazard_theta(ages, "exact_active", "Bt"), 1.0)
+        C.UNCERTAINTY_HAZARD_ENABLED = False
+        assert np.allclose(uncertainty_hazard_theta(ages, "new_plan_only", "Bt"), 1.0)
+    finally:
+        C.UNCERTAINTY_HAZARD_ENABLED = old_enabled
+        C.UNCERTAINTY_HAZARD_APPLY_TO = old_apply
+        C.UNCERTAINTY_HAZARD_FIELD_PARAMS = old_field
+
+
+def test_ql_hazard_reference_is_wiring_neutral_for_projection_and_90d():
+    model = StrataModel()
+    params, _ = model.resolve("Ya", "nonsour", "brt")
+    well = WellState(
+        code="Ya_004",
+        raw_id="Ya_004",
+        plan_field="Ярактинское НГКМ",
+        model_field="Ya",
+        stratum="Ya_nonsour_brt",
+        params=params,
+        age_pmf={100: 0.25, 500: 0.75},
+        age_source="imputed_stratum",
+        age_mean=400.0,
+        state_label="exact_stale_imputed",
+        scope_label="included",
+        confidence="medium",
+        contractor_group="brt",
+        contractor_source="exact_history",
+        sour_class="nonsour",
+        sour_source="exact_history",
+        covariates={},
+        cov_source="none",
+        current_status=None,
+        current_in_operation=None,
+        current_status_date=None,
+        include_primary=True,
+        oil_volume=np.array([310.0, 300.0, 320.0]),
+        liquid_volume=np.array([620.0, 600.0, 640.0]),
+        op_days=np.array([31.0, 28.0, 31.0]),
+        cal_days=np.array([31.0, 28.0, 31.0]),
+        first_active_month="2026-07",
+        first_gtm_date=None,
+        event_90d_flag=False,
+    )
+    ref = C.QL_HAZARD_FIELD_REF_LOG["Ya"]
+    ref_vector = np.array([ref, ref, ref], dtype=float)
+
+    base_fail, base_lost = project_well(well, params, 16, model)
+    ql_fail, ql_lost = project_well(well, params, 16, model, log_ql_monthly=ref_vector, model_field="Ya")
+    assert np.allclose(base_fail, ql_fail, atol=1e-12)
+    assert np.allclose(base_lost, ql_lost, atol=1e-12)
+
+    base_90 = current_pump_p_fail(well.age_pmf, params, 90.0, model)
+    ql_90 = current_pump_p_fail_monthly(
+        well.age_pmf,
+        params,
+        well.op_days,
+        well.cal_days,
+        model,
+        horizon_calendar_days=90,
+        log_ql_monthly=ref_vector,
+        model_field="Ya",
+    )
+    assert abs(base_90 - ql_90) < 1e-6
+
+
+def test_current_pump_monthly_probability_is_bounded():
+    model = StrataModel()
+    params, _ = model.resolve("Ya", "nonsour", "brt")
+    p_fail = current_pump_p_fail_monthly(
+        {100: 0.4, 900: 0.6},
+        params,
+        np.array([31.0, 28.0, 31.0]),
+        np.array([31.0, 28.0, 31.0]),
+        model,
+        horizon_calendar_days=90,
+        log_ql_monthly=np.array([C.QL_HAZARD_FIELD_REF_LOG["Ya"] + math.log(5.0)] * 3),
+        model_field="Ya",
+    )
+    assert 0.0 <= p_fail <= 1.0
+
+
+def test_project_well_kpod_hazard_changes_failure_path():
+    model = StrataModel()
+    params, _ = model.resolve("Ya", "nonsour", "brt")
+    well = WellState(
+        code="Ya_005",
+        raw_id="Ya_005",
+        plan_field="Ярактинское НГКМ",
+        model_field="Ya",
+        stratum="Ya_nonsour_brt",
+        params=params,
+        age_pmf={100: 1.0},
+        age_source="history_running",
+        age_mean=100.0,
+        state_label="exact_active",
+        scope_label="included",
+        confidence="high",
+        contractor_group="brt",
+        contractor_source="exact_history",
+        sour_class="nonsour",
+        sour_source="exact_history",
+        covariates={},
+        cov_source="none",
+        current_status=None,
+        current_in_operation=None,
+        current_status_date=None,
+        include_primary=True,
+        oil_volume=np.array([310.0]),
+        liquid_volume=np.array([620.0]),
+        op_days=np.array([31.0]),
+        cal_days=np.array([31.0]),
+        first_active_month="2026-07",
+        first_gtm_date=None,
+        event_90d_flag=False,
+    )
+    base, _ = project_well(well, params, 16, model)
+    overloaded, _ = project_well(well, params, 16, model, kpod_monthly=np.array([2.0]))
+    assert overloaded[0] > base[0]
+
+
+def test_project_well_uncertainty_hazard_changes_only_new_launch_path(monkeypatch):
+    monkeypatch.setattr(C, "UNCERTAINTY_HAZARD_ENABLED", True)  # dial off by default; test the mechanism
+    model = StrataModel()
+    params, _ = model.resolve("Ya", "nonsour", "brt")
+    base_kwargs = dict(
+        code="Ya_006",
+        raw_id="Ya_006",
+        plan_field="Ярактинское НГКМ",
+        model_field="Ya",
+        stratum="Ya_nonsour_brt",
+        params=params,
+        age_pmf={0: 1.0},
+        age_source="new",
+        age_mean=0.0,
+        scope_label="included",
+        confidence="medium",
+        contractor_group="brt",
+        contractor_source="planned",
+        sour_class="nonsour",
+        sour_source="planned",
+        covariates={},
+        cov_source="none",
+        current_status=None,
+        current_in_operation=None,
+        current_status_date=None,
+        include_primary=True,
+        oil_volume=np.array([310.0]),
+        liquid_volume=np.array([620.0]),
+        op_days=np.array([31.0]),
+        cal_days=np.array([31.0]),
+        first_active_month="2026-07",
+        first_gtm_date=None,
+        event_90d_flag=False,
+    )
+    new_well = WellState(state_label="new_plan_only", **base_kwargs)
+    exact_well = WellState(state_label="exact_active", **base_kwargs)
+
+    base, _ = project_well(new_well, params, 16, model)
+    uncertain, _ = project_well(
+        new_well,
+        params,
+        16,
+        model,
+        uncertainty_state_label="new_plan_only",
+        uncertainty_field="Ya",
+    )
+    exact_base, _ = project_well(exact_well, params, 16, model)
+    exact_uncertain, _ = project_well(
+        exact_well,
+        params,
+        16,
+        model,
+        uncertainty_state_label="exact_active",
+        uncertainty_field="Ya",
+    )
+    assert uncertain[0] > base[0]
+    assert np.allclose(exact_uncertain, exact_base)
+
+
+def test_historical_ql_replay_uses_daily_age_varying_theta():
+    import pandas as pd
+    from analysis.workflows.production_risk import failure_rate as fr
+
+    model = StrataModel()
+    params, _ = model.resolve("Ya", "nonsour", "brt")
+    params = dict(params)
+    params["uptime_factor"] = 1.0
+    month = "2026-01"
+
+    class _Plan:
+        months = [month]
+        liquid_volume = pd.DataFrame([[400.0 * 31.0]], index=["YA_001"], columns=[month])
+        op_days = pd.DataFrame([[31.0]], index=["YA_001"], columns=[month])
+        op_days_raw = op_days
+        cal_days = pd.Series({month: 31.0})
+
+    rows: list[dict] = []
+    fr._append_interval_predictions(
+        rows,
+        plan=_Plan(),
+        active=pd.DataFrame(True, index=["YA_001"], columns=[month]),
+        model=model,
+        field="УН-Яракта",
+        code="YA_001",
+        months=[month],
+        start=datetime(2026, 1, 1),
+        end=datetime(2026, 2, 1),
+        params=params,
+        total_op=None,
+        use_ql_hazard=True,
+    )
+
+    q_arr = model.daily_fail_prob_array(params, 40)
+    survived = 1.0
+    for age in range(31):
+        theta = ql_hazard_theta(math.log1p(400.0), "Ya", float(age))
+        q_eff = 1.0 - (1.0 - float(q_arr[age])) ** theta
+        survived *= 1.0 - q_eff
+    expected = 1.0 - survived
+
+    assert len(rows) == 1
+    assert abs(rows[0]["predicted_failures"] - expected) < 1e-12
+
+
+def test_historical_kpod_replay_uses_raw_ql_over_qnom_daily():
+    import pandas as pd
+    from analysis.workflows.production_risk import failure_rate as fr
+
+    model = StrataModel()
+    params, _ = model.resolve("Ya", "nonsour", "brt")
+    params = dict(params)
+    params["uptime_factor"] = 1.0
+    month = "2026-01"
+
+    class _Plan:
+        months = [month]
+        liquid_volume = pd.DataFrame([[200.0 * 31.0]], index=["YA_001"], columns=[month])
+        op_days = pd.DataFrame([[31.0]], index=["YA_001"], columns=[month])
+        op_days_raw = op_days
+        cal_days = pd.Series({month: 31.0})
+
+    rows: list[dict] = []
+    fr._append_interval_predictions(
+        rows,
+        plan=_Plan(),
+        active=pd.DataFrame(True, index=["YA_001"], columns=[month]),
+        model=model,
+        field="УН-Яракта",
+        code="YA_001",
+        months=[month],
+        start=datetime(2026, 1, 1),
+        end=datetime(2026, 2, 1),
+        params=params,
+        total_op=None,
+        use_kpod_hazard=True,
+        qnominal=100.0,
+    )
+
+    q_arr = model.daily_fail_prob_array(params, 40)
+    survived = 1.0
+    for age in range(31):
+        theta = kpod_hazard_theta(2.0, float(age))
+        q_eff = 1.0 - (1.0 - float(q_arr[age])) ** theta
+        survived *= 1.0 - q_eff
+    expected = 1.0 - survived
+
+    assert len(rows) == 1
+    assert abs(rows[0]["predicted_failures"] - expected) < 1e-12
+
+
 def test_age_imputation_prefers_stratum_then_field_then_global():
     pmf, source, conf = _impute_age_pmf("Ya_nonsour_brt", "Ya", {"Ya_nonsour_brt": [10, 20]}, {"Ya": [30]}, [40])
     assert source == "imputed_stratum"
@@ -222,7 +648,10 @@ def test_load_plan_uses_summary_sheet_and_clips_runtime(tmp_path: Path):
     _make_plan_workbook(path)
     plan = load_plan(date(2026, 1, 1), date(2026, 1, 1), master_path=path)
     assert plan.oil_volume.at["YA_001", "2026-01"] == 310.0
+    assert plan.oil_volume_m3.at["YA_001", "2026-01"] == 310.0
+    assert abs(plan.produced_water_rate.at["YA_001", "2026-01"] - 10.0) < 1e-12
     assert plan.registry_oil_rate.at["YA_001", "2026-01"] == 10.0
+    assert plan.registry_water_rate.at["YA_001", "2026-01"] == 0.0
     assert plan.op_days.at["YA_001", "2026-01"] == 31.0
     assert plan.producer_meta.at["YA_001", "license_area"] == "УН-Яракта"
     assert not plan.anomalies.empty
@@ -329,6 +758,13 @@ def test_repair_compat_preserves_legacy_status_shape(tmp_path: Path):
         idx = payload["dates"].index(iso)
         assert row0["statuses"][idx] == 0
     assert row0["downtime_days"] == 3
+
+    # «Вероятностный прогноз» = наработка сегодня + расстояние до подъёма, т.е. та же
+    # величина, что «Факт ННО» (полная наработка), а не остаток.  Легаси-потребитель
+    # (app/services/repair_forecast.py) сравнивает `actual_nno >= catboost_nno` —
+    # это осмысленно только для полной наработки.  Прогноз обязан быть >= факта.
+    assert row0["probabilistic_nno"] == row0["actual_nno"] + row0["days_to_workover"]
+    assert row0["probabilistic_nno"] >= row0["actual_nno"]
 
     path = repair_compat.write_excel(tmp_path / "compat.xlsx", payload)
     assert path.exists()
@@ -498,6 +934,18 @@ def test_model_prefix_mapping_and_explicit_global_fallback():
         assert crosswalk.is_explicit_global_fallback(code)
 
 
+def test_resolve_qnominal_prefers_installed_then_field_typical(monkeypatch):
+    from analysis.workflows.production_risk import crosswalk
+
+    def _fake_tables(path_key: str = ""):
+        return {"YA_001": 160.0}, {"Ya": 100.0, "Vt": 220.0}
+
+    monkeypatch.setattr(crosswalk, "_qnominal_tables", _fake_tables)
+    assert crosswalk.resolve_qnominal("YA_001", "Ya") == 160.0
+    assert crosswalk.resolve_qnominal("YA_999", "Ya") == 100.0
+    assert crosswalk.resolve_qnominal("UNKNOWN_1", None) is None
+
+
 def test_strata_model_exposes_uptime_factor(tmp_path: Path):
     from analysis.workflows.production_risk.survival import StrataModel
 
@@ -576,9 +1024,10 @@ def _fr_fixtures():
     return plan, src, projection
 
 
-def test_failure_rate_fleet_observed_and_forecast():
+def test_failure_rate_fleet_observed_and_forecast(monkeypatch):
     from analysis.workflows.production_risk import failure_rate as fr
 
+    monkeypatch.setattr(fr, "_bundle_observed_failures", lambda *args, **kwargs: None)
     plan, src, projection = _fr_fixtures()
     cfg = C.RunConfig(
         forecast_start=date(2026, 7, 1),
@@ -600,7 +1049,7 @@ def test_failure_rate_fleet_observed_and_forecast():
     # reporting УН name, so no production reporting-field factor applies.
     expected_ya = (
         0.15
-        * fr._CALIBRATION_FACTORS["Ya"]
+        * fr._CALIBRATION_FACTORS.get("Ya", 1.0)
         * fr._REPORTING_FIELD_CALIBRATION_FACTORS.get("УН-Яракта", 1.0)
     )
     assert abs(g.at["2026-07", "predicted_failures"] - expected_ya) < 1e-9
@@ -692,3 +1141,32 @@ def test_repair_compat_spreads_same_month_events_by_well():
     payload = repair_compat.build(df, [], cfg)
     dates = [row["event_dates"][0] for row in payload["rows"]]
     assert len(set(dates)) == len(dates)
+
+
+def test_drop_stale_open_runs_kills_contradicted_open_rows():
+    """An open run is stale when the same well has a newer install (VT_2704 pattern:
+    brine-bore runs folded onto the oil code) or a closed run ending after the open
+    run began (YA_601 pattern: Big open row never closed).  A fresh open run after a
+    same-week pump swap must survive."""
+    import pandas as pd
+
+    from analysis.workflows.production_risk.esp_population import drop_stale_open_runs
+
+    pop = pd.DataFrame(
+        [
+            # YA_601 pattern: open row shadowed by a later closed run.
+            {"code": "A_1", "install": pd.Timestamp("2016-06-24"), "end": pd.NaT},
+            {"code": "A_1", "install": pd.Timestamp("2016-01-01"), "end": pd.Timestamp("2017-09-02")},
+            # VT_2704 pattern: open row shadowed by a later INSTALL (still open or not).
+            {"code": "B_2", "install": pd.Timestamp("2023-02-13"), "end": pd.NaT},
+            {"code": "B_2", "install": pd.Timestamp("2023-11-06"), "end": pd.Timestamp("2024-05-06")},
+            # Healthy: closed run, then a swap within tolerance, current run open.
+            {"code": "C_3", "install": pd.Timestamp("2024-01-01"), "end": pd.Timestamp("2025-05-01")},
+            {"code": "C_3", "install": pd.Timestamp("2025-05-03"), "end": pd.NaT},
+        ]
+    )
+    out = drop_stale_open_runs(pop)
+    open_codes = set(out.loc[out["end"].isna(), "code"])
+    assert open_codes == {"C_3"}
+    # Closed history is never touched.
+    assert (out["end"].notna().sum()) == 3

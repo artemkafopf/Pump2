@@ -144,6 +144,7 @@ def _write_full_tables(
     _write_csv_unlocked(production["monthly"], tables / "A_production_at_risk_monthly.csv", index=False, encoding="utf-8-sig")
     _write_csv_unlocked(production["by_well"], tables / "A_production_at_risk_by_well.csv", index=False, encoding="utf-8-sig")
     _write_csv_unlocked(production["by_field"], tables / "A_production_at_risk_by_field.csv", index=False, encoding="utf-8-sig")
+    _write_csv_unlocked(production["kpod_by_field"], tables / "A_kpod_by_field_monthly.csv", index=False, encoding="utf-8-sig")
     _write_csv_unlocked(workover, tables / "B_workover_load_monthly.csv", index=False, encoding="utf-8-sig")
     _write_csv_unlocked(changeout, tables / "C_changeout_priority.csv", index=False, encoding="utf-8-sig")
     _write_csv_unlocked(audit, tables / "D_mapping_audit.csv", index=False, encoding="utf-8-sig")
@@ -223,19 +224,36 @@ def run(cfg: C.RunConfig | None = None, write_excel: bool | None = None) -> dict
         plan.fwd_months,
         cfg.changeout_p90,
         downtime_override_days=cfg.downtime_override_days,
+        gtm_age_reset=cfg.gtm_age_reset,
     )
 
     print("[5/6] building planner outputs ...")
     production = layers.production_at_risk(projection, plan)
+    production["kpod_by_field"] = layers.kpod_by_field_monthly(
+        plan,
+        cfg.forecast_start,
+        equipment_big_path=cfg.equipment_big_path,
+    )
     workover = layers.workover_load(projection, gtm, plan.fwd_months)
     changeout = layers.changeout(production["by_well"])
     repair_forecast = repair_compat.build(projection, states, cfg, scenario_id=C.PRIMARY_SCENARIO_ID)
     repair_forecast_stress = repair_compat.build(projection, states, cfg, scenario_id=C.STRESS_SCENARIO_ID)
+    # One shared CatBoost model feeds both scenario failure-rate lines (its survival curves
+    # are scenario-independent), so the heavy fit happens once — Python/CLI path only.
+    catboost_model = None
+    if getattr(cfg, "enable_catboost_compare", False):
+        from analysis.workflows.production_risk import failure_rate_catboost as _cbfr
+        print("      fitting CatBoost failure model (comparison flag on) ...")
+        catboost_model = _cbfr.build_model(failure_rate_mod.build_well_field(plan))
     failure_rate = failure_rate_mod.compute(
-        plan, esp_source, projection, cfg, scenario_id=C.PRIMARY_SCENARIO_ID, model=model
+        plan, esp_source, projection, cfg, scenario_id=C.PRIMARY_SCENARIO_ID, model=model,
+        hazard=hazard,
+        catboost_model=catboost_model,
     )
     failure_rate_stress = failure_rate_mod.compute(
-        plan, esp_source, projection, cfg, scenario_id=C.STRESS_SCENARIO_ID, model=model
+        plan, esp_source, projection, cfg, scenario_id=C.STRESS_SCENARIO_ID, model=model,
+        hazard=hazard,
+        catboost_model=catboost_model,
     )
     print(
         f"      failure-rate: fields={len(failure_rate.fields)}  "

@@ -43,6 +43,8 @@ class WellState:
     first_active_month: str | None
     first_gtm_date: pd.Timestamp | None
     event_90d_flag: bool
+    water_rate_m3d: np.ndarray | None = None
+    gtm_dates: tuple[pd.Timestamp, ...] = ()
 
 
 class StrataModel:
@@ -209,6 +211,199 @@ def current_pump_p_fail(
     return float(np.clip(out, 0.0, 1.0))
 
 
+def ql_hazard_theta(log_ql: float, model_field: str | None, ages: np.ndarray | float) -> np.ndarray | float:
+    """Monthly Ql (IOR) hazard multiplier — stress-scenario sensitivity dial.
+
+    ``log_ql`` is log1p(monthly liquid rate, m3/d).  The covariate is field-centered and
+    capped at +/- log(5).  The multiplier is ``exp(z * (beta + gamma * log(max(age,1))))``;
+    with the sign-corrected config (``beta=+0.07``, ``gamma=0``) this is a plain
+    proportional hazard: higher-than-reference liquid rate raises the hazard at every age
+    (physically forward), capped at ~+12% at 5x field Ql.  See ``config`` for the sign
+    history and the reverse-causation caveat.
+    """
+    if not C.QL_HAZARD_ENABLED or not np.isfinite(float(log_ql)):
+        return np.ones_like(ages, dtype=float) if isinstance(ages, np.ndarray) else 1.0
+    age_arr = np.asarray(ages, dtype=float)
+    ref = C.QL_HAZARD_FIELD_REF_LOG.get(str(model_field or ""), C.QL_HAZARD_GLOBAL_REF_LOG)
+    z = np.clip(float(log_ql) - float(ref), -C.QL_HAZARD_CAP_LOG_RATIO, C.QL_HAZARD_CAP_LOG_RATIO)
+    coef = C.QL_HAZARD_BETA + C.QL_HAZARD_GAMMA * np.log(np.maximum(age_arr, 1.0))
+    eta = z * coef
+    theta = np.exp(np.clip(eta, -8.0, 8.0))
+    if isinstance(ages, np.ndarray):
+        return theta
+    return float(theta)
+
+
+def kpod_hazard_theta(kpod: float, ages: np.ndarray | float, field: str | None = None) -> np.ndarray | float:
+    """Raw Kpod U-shape hazard multiplier, stress-scenario sensitivity dial.
+
+    ``kpod`` is monthly ``Ql / Qnominal`` (not frequency-normalized).  Values inside
+    ``[k_lo, k_hi]`` are neutral.  The underload and overload sides have separate
+    non-negative beta terms plus optional age interactions, with side-specific caps.
+    """
+    if not C.KPOD_HAZARD_ENABLED or not np.isfinite(float(kpod)):
+        return np.ones_like(ages, dtype=float) if isinstance(ages, np.ndarray) else 1.0
+    age_arr = np.asarray(ages, dtype=float)
+    p = C.kpod_hazard_params(field)
+    k = float(kpod)
+    s_under = min(max(float(p["k_lo"]) - k, 0.0), float(p["cap_under"]))
+    s_over = min(max(k - float(p["k_hi"]), 0.0), float(p["cap_over"]))
+    if s_under <= 0.0 and s_over <= 0.0:
+        return np.ones_like(age_arr, dtype=float) if isinstance(ages, np.ndarray) else 1.0
+    log_age = np.log(np.maximum(age_arr, 1.0))
+    coef_u = float(p["beta_under"]) + float(p["gamma_under"]) * log_age
+    coef_o = float(p["beta_over"]) + float(p["gamma_over"]) * log_age
+    eta = s_under * coef_u + s_over * coef_o
+    theta = np.exp(np.clip(eta, -8.0, 8.0))
+    if isinstance(ages, np.ndarray):
+        return theta
+    return float(theta)
+
+
+def infant_hazard_theta(
+    ages: np.ndarray | float,
+    field: str | None = None,
+) -> np.ndarray | float:
+    """Measured infant-mortality hazard multiplier: ``1 + u0*exp(-age/tau)``, capped.
+
+    Supplies the early-life hazard the shipped single Weibull structurally cannot
+    hold (it delivers ~65% of the real day-8 hazard in every stratum while being
+    calibrated past ~45 d).  Applies to EVERY pump at every age — a renewed pump is
+    a new pump — and in every scenario, because this is measured physics, not a
+    stress dial.  See ``config.INFANT_HAZARD_ENABLED``.
+    """
+    if not C.INFANT_HAZARD_ENABLED:
+        return np.ones_like(ages, dtype=float) if isinstance(ages, np.ndarray) else 1.0
+    p = C.infant_hazard_params(field)
+    u0 = max(0.0, float(p["u0"]))
+    tau = float(p["tau_days"])
+    cap = max(1.0, float(p["cap"]))
+    age_arr = np.asarray(ages, dtype=float)
+    if u0 <= 0.0 or tau <= 0.0:
+        theta = np.ones_like(age_arr, dtype=float)
+    else:
+        theta = 1.0 + u0 * np.exp(-np.maximum(age_arr, 0.0) / tau)
+    theta = np.clip(theta, 1.0, cap)
+    return theta if isinstance(ages, np.ndarray) else float(theta)
+
+
+def uncertainty_hazard_theta(
+    ages: np.ndarray | float,
+    state_label: str | None,
+    field: str | None = None,
+) -> np.ndarray | float:
+    """New-launch uncertainty hazard multiplier, stress-scenario sensitivity dial.
+
+    The multiplier is only active for configured future/new-pump state labels.  It
+    starts at ``1 + u0`` when operating age is zero and decays toward 1 as the pump
+    earns operating days, capped by ``cap``.
+    """
+    if not C.UNCERTAINTY_HAZARD_ENABLED:
+        return np.ones_like(ages, dtype=float) if isinstance(ages, np.ndarray) else 1.0
+    if str(state_label or "") not in C.UNCERTAINTY_HAZARD_APPLY_TO:
+        return np.ones_like(ages, dtype=float) if isinstance(ages, np.ndarray) else 1.0
+    p = C.uncertainty_hazard_params(field)
+    u0 = max(0.0, float(p["u0"]))
+    tau = max(0.0, float(p["tau_days"]))
+    cap = max(1.0, float(p["cap"]))
+    age_arr = np.asarray(ages, dtype=float)
+    if u0 <= 0.0:
+        theta = np.ones_like(age_arr, dtype=float)
+    elif tau <= 0.0:
+        theta = 1.0 + u0 * (age_arr <= 0.0)
+    else:
+        theta = 1.0 + u0 * np.exp(-np.maximum(age_arr, 0.0) / tau)
+    theta = np.minimum(theta, cap)
+    if isinstance(ages, np.ndarray):
+        return theta
+    return float(theta)
+
+
+def current_pump_p_fail_monthly(
+    age_pmf: dict[int, float],
+    params: dict[str, float],
+    op_days: np.ndarray,
+    cal_days: np.ndarray,
+    model: StrataModel,
+    *,
+    horizon_calendar_days: int,
+    log_ql_monthly: np.ndarray | None = None,
+    kpod_monthly: np.ndarray | None = None,
+    model_field: str | None = None,
+    kpod_field: str | None = None,
+    uncertainty_state_label: str | None = None,
+    uncertainty_field: str | None = None,
+) -> float:
+    """Failure probability over the first N calendar days, with optional stress dials."""
+    horizon_calendar_days = max(0, int(horizon_calendar_days))
+    if horizon_calendar_days <= 0:
+        return 0.0
+    start_ages = {int(age): float(w) for age, w in age_pmf.items() if w > C.MIN_STATE_MASS}
+    max_active_days = int(math.ceil(float(np.maximum(op_days, 0.0).sum()))) + 2
+    max_age = (max(start_ages) if start_ages else 0) + max_active_days + 2
+    q_arr = model.daily_fail_prob_array(params, max_age)
+    q_pad = np.zeros(max_age + 2, dtype=float)
+    q_pad[: len(q_arr)] = q_arr
+    if len(q_arr):
+        q_pad[len(q_arr):] = q_arr[-1]
+
+    up = np.zeros(max_age + 2, dtype=float)
+    for age, weight in start_ages.items():
+        up[age] += weight
+    hi = (max(start_ages) + 1) if start_ages else 1
+    p_active = np.divide(op_days, cal_days, out=np.zeros_like(op_days, dtype=float), where=cal_days > 0)
+    p_active = np.clip(p_active, 0.0, 1.0)
+    log_ql = log_ql_monthly if log_ql_monthly is not None else np.full(len(op_days), np.nan)
+    kpod = kpod_monthly if kpod_monthly is not None else np.full(len(op_days), np.nan)
+
+    # The infant dial is measured physics, not a stress sensitivity: it is on in
+    # every scenario and for every pump, including each renewal (which re-enters the
+    # infant window at age 0).
+    use_infant = C.INFANT_HAZARD_ENABLED
+    use_dials = (
+        log_ql_monthly is not None
+        or kpod_monthly is not None
+        or uncertainty_state_label is not None
+        or use_infant
+    )
+    ages_full = np.arange(max_age + 2, dtype=float) if use_dials else None
+    failed = 0.0
+    remaining = horizon_calendar_days
+    for mi in range(len(cal_days)):
+        if remaining <= 0:
+            break
+        days = min(int(round(float(cal_days[mi]))), remaining)
+        p = float(p_active[mi])
+        # q_eff is constant within a month (dials depend only on month-constant inputs +
+        # age); compute once and slice per day (byte-identical to the per-day recompute).
+        if use_dials:
+            theta_full = np.ones(max_age + 2, dtype=float)
+            if log_ql_monthly is not None:
+                theta_full = theta_full * ql_hazard_theta(float(log_ql[mi]), model_field, ages_full)
+            if kpod_monthly is not None:
+                theta_full = theta_full * kpod_hazard_theta(float(kpod[mi]), ages_full, kpod_field or model_field)
+            if use_infant:
+                theta_full = theta_full * infant_hazard_theta(ages_full, model_field)
+            if uncertainty_state_label is not None:
+                theta_full = theta_full * uncertainty_hazard_theta(ages_full, uncertainty_state_label, uncertainty_field or kpod_field or model_field)
+            q_eff_full = 1.0 - np.power(1.0 - q_pad, theta_full)
+        for _ in range(days):
+            remaining -= 1
+            if p <= 0.0:
+                continue
+            q_eff = q_eff_full[:hi] if use_dials else q_pad[:hi]
+            seg = up[:hi]
+            fail_vec = seg * (p * q_eff)
+            fail_day = float(fail_vec.sum())
+            moved = seg * p - fail_vec
+            seg *= 1.0 - p
+            up[1 : hi + 1] += moved
+            if hi < max_age + 1:
+                hi += 1
+            failed += fail_day
+    return float(np.clip(failed, 0.0, 1.0))
+
+
 def scenario_params(
     base_params: dict[str, float],
     covariates: dict[str, float],
@@ -226,7 +421,21 @@ def project_well(
     params: dict[str, float],
     downtime_days: int,
     model: StrataModel,
+    log_ql_monthly: np.ndarray | None = None,
+    kpod_monthly: np.ndarray | None = None,
+    model_field: str | None = None,
+    kpod_field: str | None = None,
+    uncertainty_state_label: str | None = None,
+    uncertainty_field: str | None = None,
+    gtm_reset_months: dict[int, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Project monthly expected failures and lost op-days for one well.
+
+    ``gtm_reset_months`` maps a month index to the share of age mass a planned ГТМ
+    sends back to age 0 (the pump is replaced).  Omitted → the pump renews on
+    FAILURE only, which lets it age past the range the survival fit was estimated
+    on wherever ГТМ drives most pulls.  See ``config.GTM_AGE_RESET_ENABLED``.
+    """
     month_count = len(well.cal_days)
     failures = np.zeros(month_count, dtype=float)
     lost_op_days = np.zeros(month_count, dtype=float)
@@ -262,11 +471,46 @@ def project_well(
     )
     p_active = np.clip(p_active, 0.0, 1.0)
 
+    # The infant dial is measured physics, not a stress sensitivity: it is on in
+    # every scenario and for every pump, including each renewal (which re-enters the
+    # infant window at age 0).
+    use_infant = C.INFANT_HAZARD_ENABLED
+    use_dials = (
+        log_ql_monthly is not None
+        or kpod_monthly is not None
+        or uncertainty_state_label is not None
+        or use_infant
+    )
+    ages_full = np.arange(max_age + 2, dtype=float) if use_dials else None
+
     for mi in range(month_count):
         days_in_month = int(round(float(well.cal_days[mi])))
         if days_in_month <= 0:
             continue
+        # A planned ГТМ swaps the pump out: `share` of the age mass restarts at 0,
+        # mirroring the failure renewal below (which also re-enters at age 0).
+        share = float((gtm_reset_months or {}).get(mi, 0.0))
+        if share > 0.0:
+            moved_mass = float(up[:hi].sum()) * share
+            up[:hi] *= 1.0 - share
+            up[0] += moved_mass
         p = float(p_active[mi])
+        # The dial multipliers depend only on month-constant inputs and age, so q_eff is
+        # constant within the month.  Compute it once over the full age range and slice per
+        # day (byte-identical to the previous per-day recompute, ~day_count x cheaper).
+        if use_dials:
+            theta_full = np.ones(max_age + 2, dtype=float)
+            if log_ql_monthly is not None:
+                theta_full = theta_full * ql_hazard_theta(float(log_ql_monthly[mi]), model_field, ages_full)
+            if kpod_monthly is not None:
+                theta_full = theta_full * kpod_hazard_theta(float(kpod_monthly[mi]), ages_full, kpod_field or model_field)
+            if use_infant:
+                theta_full = theta_full * infant_hazard_theta(ages_full, model_field)
+            if uncertainty_state_label is not None:
+                theta_full = theta_full * uncertainty_hazard_theta(
+                    ages_full, uncertainty_state_label, uncertainty_field or kpod_field or model_field
+                )
+            q_eff_full = 1.0 - np.power(1.0 - q_pad, theta_full)
         for _ in range(days_in_month):
             if n_down:
                 up[0] += down[0]
@@ -279,7 +523,8 @@ def project_well(
                 continue  # planned idle day: no ageing, no failures
 
             seg = up[:hi]
-            fail_vec = seg * (p * q_pad[:hi])
+            q_eff = q_eff_full[:hi] if use_dials else q_pad[:hi]
+            fail_vec = seg * (p * q_eff)
             fail_mass_day = float(fail_vec.sum())
             moved = seg * p - fail_vec           # p * (1 - q) survivors advance one day
             seg *= 1.0 - p                        # idle mass keeps its age

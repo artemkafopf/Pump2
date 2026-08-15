@@ -18,8 +18,9 @@ Deliverable definitions
   **installation dates**:
     - History: actual observed pump intervals are replayed from installation dates.
       ``WellsArtificialLiftBig`` backfills missing installations from ``Свод``;
-      it supplies real starts/boundaries, but the history line does not simulate
-      renewal chains.  Future replacement renewal starts only at forecast.
+      it supplies real starts/boundaries, but the displayed history line is a
+      conditional active-fleet month-start rate, matching the forecast chart
+      interpretation.  Future replacement renewal starts only at forecast.
     - Forecast (>= forecast_start): the sanctioned forward projection's
       ``expected_failures`` aggregated by field/month.
 
@@ -34,8 +35,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
+import math
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Collection
 import warnings
 
 import numpy as np
@@ -47,7 +49,15 @@ from openpyxl.utils import get_column_letter
 
 from analysis.workflows.production_risk import config as C
 from analysis.workflows.production_risk import crosswalk
-from analysis.workflows.production_risk.survival import StrataModel, current_pump_p_fail
+from analysis.workflows.production_risk.survival import (
+    HazardLayer,
+    StrataModel,
+    current_pump_p_fail,
+    infant_hazard_theta,
+    kpod_hazard_theta,
+    ql_hazard_theta,
+    scenario_params,
+)
 from analysis.workflows.production_risk.time_map import TimeMap, interval_slices
 
 GLOBAL_LABEL = "ГЛОБАЛЬНО"
@@ -67,54 +77,17 @@ FACT_DISPLAY_FIRST_MONTH = "2024-01"
 # does not promote a tiny long-lived field just for accumulating failures slowly.
 CHART_MIN_MEAN_FLEET = 12.0
 
-# EXPERIMENTAL: model-field strata whose history line is survival-weighted (mass
-# decays as it fails, so a pump's expected failures telescope to F(age)=1-S(age)
-# instead of the over-counting conditional-hazard sum).  Scoped per-stratum because
-# the effect is not uniform: it corrects Mc/Мирнинский (fact/model 0.60 -> 0.92) but
-# OVERSHOOTS long-lived Ya (0.76 -> 1.65, failed pumps under-credited at F<1), so Ya
-# is left on the unweighted line.  Empty set = today's behaviour fleet-wide.
-_SURVIVAL_WEIGHT_FIELDS: frozenset[str] = frozenset({"Mc"})
+# Optional legacy audit hook for model-field strata whose history line is
+# survival-weighted (mass decays as it fails).  The shipped validation chart now
+# leaves this empty so history and forecast share the same conditional
+# active-at-month-start interpretation.
+_SURVIVAL_WEIGHT_FIELDS: frozenset[str] = frozenset()
 
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │ MODIFIED PARAMETERS — MANUAL EMPIRICAL CALIBRATION (not a survival-model fit) │
-# └─────────────────────────────────────────────────────────────────────────────┘
-# The base strata Weibulls run hot on Ya/Vt: over the fact window 2024-01..2026-04
-# they over-predict genuine failures (fact/model Ya=235/311=0.76, Vt=251/300=0.84).
-# Survival-weighting overshoots these long-lived strata, so their residual is closed
-# with a fixed multiplicative calibration instead.  Determined ONCE (2026-07-14) from
-# that window and HELD CONSTANT — do NOT recompute per run (that would force the ratio
-# to 1 by construction and hide model drift).  Applied to both history and forecast.
-# These are hand-set adjustments layered on top of the model; they are surfaced in the
-# «Интенсивность отказов» sheet header and the coverage diagnostics so the modification
-# is never silent.
-_CALIBRATION_FACTORS: dict[str, float] = {
-    "Ya": 0.756,   # Ярактинский — MODIFIED (fact/model over 2024-01..2026-04)
-    "Vt": 0.837,   # Верхнетирский — MODIFIED (fact/model over 2024-01..2026-04)
-}
-
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │ MODIFIED PARAMETERS — REPORTING-FIELD EMPIRICAL CALIBRATION (not a fit)      │
-# └─────────────────────────────────────────────────────────────────────────────┘
-# Same manual tune extended to every УН with non-zero model mass in the completed
-# fact window 2024-01..2026-04, after the stratum-level adjustments above.  These
-# factors are determined once from fact/model and HELD CONSTANT.  They are applied
-# before the ГЛОБАЛЬНО row is aggregated, so the global model line is calibrated by
-# the sum of calibrated fields (no separate post-aggregation multiplier that would
-# break additivity).  Fields with zero model mass have no defensible factor.
-_REPORTING_FIELD_CALIBRATION_FACTORS: dict[str, float] = {
-    "Верхнетирский УН": 1.000126898615,        # MODIFIED: 251 / 250.968152 (after Vt tune)
-    "Ярактинский УН": 0.999254776044,          # MODIFIED: 235 / 235.175258 (after Ya tune)
-    "Аянский участок": 0.893462550865,         # MODIFIED: 110 / 123.116520
-    "Аянский (Западный) УН": 0.552146471743,  # MODIFIED: 65 / 117.722386
-    "Западно-Ярактинский УН": 0.596906670562, # MODIFIED: 33 / 55.285025
-    "Мирнинский УН": 0.929134934813,           # MODIFIED: 46 / 49.508417 (after Mc survival-weight)
-    "Даниловский УН": 0.783226592147,          # MODIFIED: 8 / 10.214158
-    "Марковский УН": 0.334734735823,           # MODIFIED: 3 / 8.962321
-    "Аянская площадь УН": 0.868056226090,      # MODIFIED: 3 / 3.455997
-    "Кийский УН": 0.888693310865,              # MODIFIED: 3 / 3.375743
-    "Большетирский УН": 3.184612392658,        # MODIFIED: 2 / 0.628020
-    "Иктехский УН": 0.0,                       # MODIFIED: 0 / 0.106840
-}
+# Legacy empirical calibration factors retired by Workstreams D/E on 2026-07-15.
+# The accepted bundle (`2026-07-15-mc2023plus`) passes the Mc/Ya/Vt/global
+# 2024-01..2026-06 fact/model gate with manual factors disabled.
+_CALIBRATION_FACTORS: dict[str, float] = {}
+_REPORTING_FIELD_CALIBRATION_FACTORS: dict[str, float] = {}
 
 
 @dataclass
@@ -346,6 +319,21 @@ def _observed_failures_by_field(
     return pd.concat([field_agg, global_agg], ignore_index=True)
 
 
+def _bundle_observed_failures(bundle_date: str, months: set[str]) -> pd.DataFrame | None:
+    path = C.observed_failures_path(bundle_date)
+    if not path.exists():
+        return None
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    required = {"field", "month", "observed_failures"}
+    if not required.issubset(df.columns):
+        raise ValueError(f"{path} must contain columns {sorted(required)}")
+    out = df[["field", "month", "observed_failures"]].copy()
+    out["month"] = out["month"].astype(str)
+    out = out[out["month"].isin(months)].copy()
+    out["observed_failures"] = pd.to_numeric(out["observed_failures"], errors="coerce").fillna(0.0)
+    return out.groupby(["field", "month"], as_index=False)["observed_failures"].sum()
+
+
 def _active_producing_mask(plan, months: list[str]) -> pd.DataFrame:
     op = plan.op_days_raw.reindex(columns=months, fill_value=0.0)
     oil = plan.oil_volume.reindex(index=op.index, columns=months, fill_value=0.0)
@@ -447,9 +435,23 @@ def _append_interval_predictions(
     p_fail_fn: Callable[[dict[int, float], float], float] | None = None,
     survival_weight: bool = False,
     calibration: float = 1.0,
+    use_ql_hazard: bool = False,
+    use_kpod_hazard: bool = False,
+    qnominal: float | None = None,
+    ql_audit_rows: list[dict] | None = None,
     time_map: TimeMap | None = None,
+    emit_rows: list[dict] | None = None,
+    emit_stratum: str | None = None,
+    emit_covariates: dict[str, float] | None = None,
+    emit_event_month: str | None = None,
 ) -> None:
     """Append non-renewal expected failures over one observed pump interval.
+
+    ``emit_rows`` is an additive, off-by-default instrumentation hook for the
+    Workstream-C hazard refit: when a list is supplied, one per-run-month row is
+    appended for every replayed slice carrying the *baseline* expected failures
+    (``mu_baseline``), operating age/exposure, resolved stratum, hazard covariates
+    and the A-population event flag.  It never alters ``rows`` or the shipped output.
 
     ``p_fail_fn(age_pmf, op_days) -> float`` is the pluggable survival hook: its default is
     the Weibull ``current_pump_p_fail`` closure (so the Weibull line stays byte-identical),
@@ -463,9 +465,164 @@ def _append_interval_predictions(
     of the inflated conditional-hazard sum (``≈ -ln S``).  This matches how the forward
     ``project_well`` decays age-mass and removes the systematic history over-count.
     """
+    ql_daily_available = p_fail_fn is None
     if p_fail_fn is None:
         def p_fail_fn(age_pmf: dict[int, float], op_days: float) -> float:
             return current_pump_p_fail(age_pmf, params, op_days, model)
+
+    def _ql_inputs(month: str) -> tuple[float | None, str]:
+        if month not in getattr(plan, "months", []):
+            return None, "not_plan_month"
+        try:
+            liq = float(plan.liquid_volume.at[code, month])
+            op = float(plan.op_days.at[code, month])
+        except Exception:
+            return None, "lookup_failed"
+        if not np.isfinite(liq) or not np.isfinite(op) or liq <= 0.0 or op <= 0.0:
+            return None, "nonpositive_or_nonfinite_ql"
+        return liq / op, "ok"
+
+    def _kpod_inputs(month: str) -> tuple[float | None, str]:
+        ql, status = _ql_inputs(month)
+        if ql is None:
+            return None, status
+        qnom = _as_positive_float(qnominal)
+        if qnom is None:
+            return None, "missing_qnominal"
+        return ql / qnom, "ok"
+
+    def _kpod_field() -> str | None:
+        text = str(field or "").casefold()
+        if "большетир" in text:
+            return "Bt"
+        return crosswalk.map_model_field_from_well(code)
+
+    def _audit_ql(month: str, age0: float, op_days: float, status: str, theta: float | None) -> None:
+        if ql_audit_rows is None:
+            return
+        ql_audit_rows.append(
+            {
+                "field": field,
+                "code": code,
+                "month": month,
+                "in_plan_month": bool(month in getattr(plan, "months", [])),
+                "model_field": crosswalk.map_model_field_from_well(code) or "",
+                "age_start": float(age0),
+                "op_days": float(op_days),
+                "status": status,
+                "theta": float(theta) if theta is not None and np.isfinite(theta) else np.nan,
+            }
+        )
+
+    def _stress_daily_probability(month: str, age0: float, op_days: float) -> tuple[float | None, str, float | None]:
+        if not ql_daily_available:
+            return None, "monthly_fallback", None
+        ql, status = _ql_inputs(month)
+        kpod, kpod_status = _kpod_inputs(month)
+        if use_ql_hazard and ql is None:
+            return None, status, None
+        if use_kpod_hazard and kpod is None:
+            return None, kpod_status, None
+        model_field = crosswalk.map_model_field_from_well(code)
+        age = max(0, int(round(float(age0))))
+        remaining = max(0.0, float(op_days))
+        q_arr = model.daily_fail_prob_array(params, age + int(math.ceil(remaining)) + 2)
+        survived = 1.0
+        theta_first: float | None = None
+        while remaining > 1e-12 and survived > 0.0:
+            step = min(1.0, remaining)
+            q_base = float(q_arr[min(age, len(q_arr) - 1)])
+            theta = 1.0
+            if use_ql_hazard and ql is not None:
+                theta *= float(ql_hazard_theta(float(np.log1p(ql)), model_field, float(age)))
+            if use_kpod_hazard and kpod is not None:
+                theta *= float(kpod_hazard_theta(float(kpod), float(age), _kpod_field()))
+            if theta_first is None:
+                theta_first = theta
+            q_eff = float(np.clip(1.0 - (1.0 - q_base) ** theta, 0.0, 1.0))
+            survived *= max(0.0, 1.0 - step * q_eff)
+            remaining -= step
+            age += 1
+        return float(np.clip(1.0 - survived, 0.0, 1.0)), "applied_daily", theta_first
+
+    def _apply_infant_dial(age0: float, op_days: float, p_base: float) -> float:
+        """Measured infant-mortality multiplier — must hit the REPLAY as well as the
+        forecast, or history and forecast silently use different hazards and the
+        fact-vs-model check becomes meaningless.
+
+        The replay is MONTHLY but tau is ~11 days, so theta falls from 2.18 to ~1.07
+        *inside* the first month.  Sampling it at the month's start age would apply
+        the age-0 peak to all 30 days and over-predict badly (Vt 2024: 1.09 -> 1.33).
+        So integrate theta over the month's age span instead:
+
+            mean theta = 1 + u0*tau/D * (exp(-a0/tau) - exp(-(a0+D)/tau))
+
+        `project_well` does not need this — it indexes theta by age day-by-day.
+        """
+        if not C.INFANT_HAZARD_ENABLED or p_base <= 0.0:
+            return p_base
+        p = C.infant_hazard_params(crosswalk.map_model_field_from_well(code))
+        u0, tau, cap = float(p["u0"]), float(p["tau_days"]), float(p["cap"])
+        a0 = float(max(age0, 0.0))
+        d = float(max(op_days, 0.0))
+        if u0 <= 0.0 or tau <= 0.0:
+            return p_base
+        if d <= 0.0:
+            theta = 1.0 + u0 * math.exp(-a0 / tau)
+        else:
+            theta = 1.0 + (u0 * tau / d) * (math.exp(-a0 / tau) - math.exp(-(a0 + d) / tau))
+        theta = float(np.clip(theta, 1.0, max(cap, 1.0)))
+        if theta <= 0.0 or not np.isfinite(theta):
+            return p_base
+        return float(np.clip(1.0 - (1.0 - float(p_base)) ** theta, 0.0, 1.0))
+
+    def _apply_stress_dials(month: str, age0: float, op_days: float, p_base: float) -> float:
+        p_base = _apply_infant_dial(age0, op_days, p_base)
+        if (not use_ql_hazard and not use_kpod_hazard) or p_base <= 0.0:
+            return p_base
+        p_daily, status, theta_audit = _stress_daily_probability(month, age0, op_days)
+        if p_daily is not None:
+            _audit_ql(month, age0, op_days, status, theta_audit)
+            return p_daily
+        ql, ql_status = _ql_inputs(month)
+        kpod, kpod_status = _kpod_inputs(month)
+        if use_ql_hazard and ql is None:
+            _audit_ql(month, age0, op_days, ql_status, None)
+            return p_base
+        if use_kpod_hazard and kpod is None:
+            _audit_ql(month, age0, op_days, kpod_status, None)
+            return p_base
+        theta = 1.0
+        model_field = crosswalk.map_model_field_from_well(code)
+        if use_ql_hazard and ql is not None:
+            theta *= float(ql_hazard_theta(float(np.log1p(ql)), model_field, float(max(age0, 0.0))))
+        if use_kpod_hazard and kpod is not None:
+            theta *= float(kpod_hazard_theta(float(kpod), float(max(age0, 0.0)), _kpod_field()))
+        if theta <= 0.0 or not np.isfinite(theta):
+            _audit_ql(month, age0, op_days, "nonfinite_theta", None)
+            return p_base
+        _audit_ql(month, age0, op_days, "applied_monthly", theta)
+        return float(np.clip(1.0 - (1.0 - float(p_base)) ** theta, 0.0, 1.0))
+
+    def _emit(month: str, age_start: float, op_days: float) -> None:
+        if emit_rows is None:
+            return
+        mu = float(p_fail_fn({int(round(float(age_start))): 1.0}, float(op_days)))
+        row = {
+            "code": code,
+            "field": field,
+            "model_field": crosswalk.map_model_field_from_well(code),
+            "stratum": emit_stratum,
+            "month": month,
+            "age_start": float(age_start),
+            "op_days": float(op_days),
+            "mu_baseline": mu,
+            "event": 1 if (emit_event_month is not None and month == emit_event_month) else 0,
+        }
+        if emit_covariates:
+            for _k, _v in emit_covariates.items():
+                row[f"cov_{_k}"] = _v
+        emit_rows.append(row)
 
     mapped = interval_slices(
         months=months,
@@ -483,7 +640,13 @@ def _append_interval_predictions(
     if mapped:
         surv = 1.0
         for sl in mapped:
-            p_cond = p_fail_fn({int(round(sl.age_start)): 1.0}, sl.op_days)
+            _emit(sl.month, sl.age_start, sl.op_days)
+            p_cond = _apply_stress_dials(
+                sl.month,
+                sl.age_start,
+                sl.op_days,
+                p_fail_fn({int(round(sl.age_start)): 1.0}, sl.op_days),
+            )
             p = (surv * p_cond if survival_weight else p_cond) * calibration
             if p > 0:
                 rows.append({
@@ -495,6 +658,7 @@ def _append_interval_predictions(
             if survival_weight:
                 surv *= max(0.0, 1.0 - p_cond)
         return
+
     slices: list[tuple[str, float, float]] = []
     for month in months:
         m_start = pd.Period(month, freq="M").start_time.to_pydatetime()
@@ -528,7 +692,13 @@ def _append_interval_predictions(
             op_days_month = float(total_op) * (overlap / span_days)
             m_start = pd.Period(month, freq="M").start_time.to_pydatetime()
             age_start = float(total_op) * (max((m_start - start).days, 0) / span_days)
-            p_cond = p_fail_fn({int(round(age_start)): 1.0}, op_days_month)
+            _emit(month, age_start, op_days_month)
+            p_cond = _apply_stress_dials(
+                month,
+                age_start,
+                op_days_month,
+                p_fail_fn({int(round(age_start)): 1.0}, op_days_month),
+            )
             p = (surv * p_cond if survival_weight else p_cond) * calibration
             if p > 0:
                 rows.append({
@@ -546,7 +716,8 @@ def _append_interval_predictions(
     surv = 1.0
     for month, overlap, _ in slices:
         op_days_month = max(0.0, overlap * uptime)
-        p_cond = p_fail_fn({int(round(age)): 1.0}, op_days_month)
+        _emit(month, age, op_days_month)
+        p_cond = _apply_stress_dials(month, age, op_days_month, p_fail_fn({int(round(age)): 1.0}, op_days_month))
         p = (surv * p_cond if survival_weight else p_cond) * calibration
         if p > 0:
             rows.append({
@@ -571,6 +742,10 @@ def _hist_predicted_failures_by_field(
     forecast_first: str,
     equipment_big_path: Path | None = None,
     p_fail_provider: Callable[[str, datetime, str], Callable[[dict[int, float], float], float]] | None = None,
+    hazard: HazardLayer | None = None,
+    hazard_mode: str = "baseline",
+    bundle_date: str = C.BUNDLE_DATE,
+    emit_rows: list[dict] | None = None,
 ) -> pd.DataFrame:
     """Weibull-predicted failures per month over history from observed intervals.
 
@@ -590,6 +765,11 @@ def _hist_predicted_failures_by_field(
     cutoff = esp_source.source_cutoff or datetime(2026, 6, 1)
     forecast_start = pd.Period(forecast_first, freq="M").start_time.to_pydatetime()
     rows: list[dict] = []
+    ql_audit_rows: list[dict] = []
+    use_hazard = hazard_mode == "stress"
+    emit = emit_rows is not None
+    hazard = hazard or HazardLayer(bundle_date=bundle_date)
+    run_cov_map = crosswalk._load_run_covariates(bundle_date) if (use_hazard or emit) else {}
     time_map = getattr(model, "time_map", TimeMap.missing())
 
     svod_by_key: dict[str, list] = {}
@@ -608,6 +788,33 @@ def _hist_predicted_failures_by_field(
                 best = run
                 best_gap = gap
         return best
+
+    def _run_ordinal(code: str, run) -> int | None:
+        if run is None:
+            return None
+        candidates = [r for r in svod_by_key.get(_join_key(code), []) if r.mount is not None]
+        for idx, candidate in enumerate(candidates, start=1):
+            if candidate is run:
+                return idx
+            if candidate.mount is not None and run.mount is not None and abs((candidate.mount - run.mount).days) <= 7:
+                return idx
+        return None
+
+    def _previous_svod_run(code: str, ordinal: int | None):
+        if ordinal is None or ordinal <= 1:
+            return None
+        candidates = [r for r in svod_by_key.get(_join_key(code), []) if r.mount is not None]
+        return candidates[ordinal - 2] if ordinal - 2 < len(candidates) else None
+
+    def _hazard_covariates(code: str, run, ordinal: int | None) -> dict[str, float]:
+        if run is None or (not use_hazard and not emit):
+            return {}
+        norm_code = crosswalk.norm_well(code) or code
+        cov = dict(run_cov_map.get((norm_code, int(ordinal)), {})) if ordinal is not None else {}
+        fallback = crosswalk._fallback_covariates(run, _previous_svod_run(code, ordinal), ordinal)
+        for key, value in fallback.items():
+            cov.setdefault(key, value)
+        return cov
 
     # Big-backed observed intervals.  Big adds real missing starts, but we do not
     # generate additional replacements beyond the observed Big/Svod interval list.
@@ -644,10 +851,26 @@ def _hist_predicted_failures_by_field(
                 sour,
                 ctr,
             )
+            ordinal = _run_ordinal(code, match)
+            if use_hazard:
+                params, _theta = scenario_params(
+                    params,
+                    _hazard_covariates(code, match, ordinal),
+                    hazard,
+                    "stress",
+                )
 
             total_op = _as_positive_float(record.get("nno_days"))
             if total_op is None and match is not None:
                 total_op = _as_positive_float(match.age_op)
+            emit_cov = _hazard_covariates(code, match, ordinal) if emit else None
+            emit_event_month = None
+            if emit:
+                _fail = record.get("fail")
+                if _fail is not None and _is_failure_pull(record.get("pull_reason")):
+                    _m = _fail.strftime("%Y-%m")
+                    if _m in hist_months:
+                        emit_event_month = _m
             _append_interval_predictions(
                 rows,
                 plan=plan,
@@ -664,7 +887,15 @@ def _hist_predicted_failures_by_field(
                 p_fail_fn=p_fail_provider(code, start, field) if p_fail_provider else None,
                 survival_weight=model_field in _SURVIVAL_WEIGHT_FIELDS,
                 calibration=_CALIBRATION_FACTORS.get(model_field, 1.0),
+                use_ql_hazard=use_hazard and C.QL_HAZARD_ENABLED,
+                use_kpod_hazard=use_hazard and C.KPOD_HAZARD_ENABLED,
+                qnominal=crosswalk.resolve_qnominal(code, model_field, equipment_big_path),
+                ql_audit_rows=ql_audit_rows if use_hazard and C.QL_HAZARD_ENABLED else None,
                 time_map=time_map,
+                emit_rows=emit_rows,
+                emit_stratum=stratum,
+                emit_covariates=emit_cov,
+                emit_event_month=emit_event_month,
             )
 
     # Свод-only fallback for wells absent from Big.
@@ -675,7 +906,8 @@ def _hist_predicted_failures_by_field(
         if field is None:
             continue
         model_field = crosswalk.map_model_field_from_well(code)
-        for run in sorted([r for r in runs if r.mount is not None], key=lambda r: r.mount):
+        sorted_runs = sorted([r for r in runs if r.mount is not None], key=lambda r: r.mount)
+        for ordinal, run in enumerate(sorted_runs, start=1):
             start = run.mount
             if start is None or start >= forecast_start:
                 continue
@@ -687,6 +919,19 @@ def _hist_predicted_failures_by_field(
                 crosswalk.sour_group(run.sour_raw),
                 crosswalk.contractor_group(run.ctr_raw),
             )
+            if use_hazard:
+                params, _theta = scenario_params(
+                    params,
+                    _hazard_covariates(code, run, ordinal),
+                    hazard,
+                    "stress",
+                )
+            emit_cov = _hazard_covariates(code, run, ordinal) if emit else None
+            emit_event_month = None
+            if emit and run.failure_flag == 1 and run.stop is not None:
+                _m = run.stop.strftime("%Y-%m")
+                if _m in hist_months:
+                    emit_event_month = _m
             _append_interval_predictions(
                 rows,
                 plan=plan,
@@ -703,10 +948,20 @@ def _hist_predicted_failures_by_field(
                 p_fail_fn=p_fail_provider(code, start, field) if p_fail_provider else None,
                 survival_weight=model_field in _SURVIVAL_WEIGHT_FIELDS,
                 calibration=_CALIBRATION_FACTORS.get(model_field, 1.0),
+                use_ql_hazard=use_hazard and C.QL_HAZARD_ENABLED,
+                use_kpod_hazard=use_hazard and C.KPOD_HAZARD_ENABLED,
+                qnominal=crosswalk.resolve_qnominal(code, model_field, equipment_big_path),
+                ql_audit_rows=ql_audit_rows if use_hazard and C.QL_HAZARD_ENABLED else None,
                 time_map=time_map,
+                emit_rows=emit_rows,
+                emit_stratum=stratum,
+                emit_covariates=emit_cov,
+                emit_event_month=emit_event_month,
             )
     if not rows:
-        return pd.DataFrame(columns=["field", "month", "predicted_failures"])
+        out = pd.DataFrame(columns=["field", "month", "predicted_failures"])
+        out.attrs["ql_audit"] = pd.DataFrame(ql_audit_rows)
+        return out
     df = pd.DataFrame(rows)
     if _REPORTING_FIELD_CALIBRATION_FACTORS:
         # MODIFIED: empirical УН-level calibration is applied before aggregation so
@@ -717,7 +972,9 @@ def _hist_predicted_failures_by_field(
     agg_cols = ["predicted_failures", "global_pooled_predicted_failures"]
     field_agg = df.groupby(["field", "month"], as_index=False)[agg_cols].sum()
     global_agg = df.groupby("month", as_index=False)[agg_cols].sum().assign(field=GLOBAL_LABEL)
-    return pd.concat([field_agg, global_agg], ignore_index=True)
+    out = pd.concat([field_agg, global_agg], ignore_index=True)
+    out.attrs["ql_audit"] = pd.DataFrame(ql_audit_rows)
+    return out
 
 
 def _fwd_predicted_failures_by_field(
@@ -766,6 +1023,31 @@ def _fwd_predicted_failures_by_field(
         .assign(field=GLOBAL_LABEL)
     )
     return pd.concat([field_agg, global_agg], ignore_index=True)
+
+
+def _ql_audit_summary(audit: pd.DataFrame) -> dict[str, object]:
+    if audit is None or audit.empty:
+        return {"total_slices": 0, "status_counts": {}, "plan_month_status_counts": {}}
+    status_counts = audit["status"].value_counts().sort_index()
+    plan_audit = audit[audit["in_plan_month"].astype(bool)]
+    plan_status_counts = plan_audit["status"].value_counts().sort_index()
+    by_field_month = (
+        audit.groupby(["field", "month", "status"], as_index=False)
+        .size()
+        .rename(columns={"size": "slices"})
+        .sort_values(["month", "field", "status"])
+    )
+    return {
+        "total_slices": int(len(audit)),
+        "status_counts": {str(k): int(v) for k, v in status_counts.items()},
+        "plan_month_status_counts": {str(k): int(v) for k, v in plan_status_counts.items()},
+        "first_plan_month": (
+            str(audit.loc[audit["in_plan_month"].astype(bool), "month"].min())
+            if bool(audit["in_plan_month"].any())
+            else ""
+        ),
+        "by_field_month_sample": by_field_month.head(50).to_dict("records"),
+    }
 
 
 def build_well_field(plan) -> dict[str, str]:
@@ -852,9 +1134,12 @@ def compute(
     cfg: C.RunConfig,
     scenario_id: str = C.PRIMARY_SCENARIO_ID,
     model: StrataModel | None = None,
+    hazard: HazardLayer | None = None,
     catboost_model=None,
+    only_fields: Collection[str] | None = None,
 ) -> FailureRateResult:
     model = model or StrataModel(bundle_date=cfg.bundle_date)
+    hazard = hazard or HazardLayer(bundle_date=cfg.bundle_date)
     forecast_last = max(str(cfg.horizon_end.strftime("%Y-%m")), max(plan.months))
     months = _month_range(HISTORY_FIRST_MONTH, forecast_last)
     display_months = [m for m in months if m >= DISPLAY_FIRST_MONTH]
@@ -862,12 +1147,36 @@ def compute(
 
     # well -> master УН (only master wells contribute to a reporting group's fleet)
     well_field = build_well_field(plan)
+    if only_fields is not None:
+        # Every fleet/observed/predicted path keys off well_field, so restricting it
+        # here scopes the whole computation to the requested УН — the tuning app
+        # recomputes one reporting group instead of the full fleet.  GLOBAL_LABEL
+        # then aggregates only the retained wells.
+        keep = set(only_fields)
+        well_field = {wid: field for wid, field in well_field.items() if field in keep}
+        if not well_field:
+            raise ValueError(f"only_fields={sorted(keep)} matched no wells in the plan.")
 
     fleet, fleet_info = _fleet_size_hybrid(plan, esp_source, well_field, months, cfg.equipment_big_path)
-    observed = _observed_failures_by_field(esp_source, well_field, set(months), cfg.equipment_big_path)
+    observed = _bundle_observed_failures(cfg.bundle_date, set(months))
+    if observed is None:
+        observed = _observed_failures_by_field(esp_source, well_field, set(months), cfg.equipment_big_path)
     hist_pred = _hist_predicted_failures_by_field(
-        plan, esp_source, projection, scenario_id, model, well_field, months, forecast_first, cfg.equipment_big_path
+        plan,
+        esp_source,
+        projection,
+        scenario_id,
+        model,
+        well_field,
+        months,
+        forecast_first,
+        cfg.equipment_big_path,
+        hazard=hazard,
+        hazard_mode="stress" if scenario_id == C.STRESS_SCENARIO_ID else "baseline",
+        bundle_date=cfg.bundle_date,
     )
+    ql_audit = hist_pred.attrs.get("ql_audit", pd.DataFrame())
+    ql_audit_summary = _ql_audit_summary(ql_audit)
     fwd_pred = _fwd_predicted_failures_by_field(projection, scenario_id, forecast_first, well_field, model)
     predicted = pd.concat([hist_pred, fwd_pred], ignore_index=True)
     if not predicted.empty:
@@ -972,12 +1281,27 @@ def compute(
         "fact_display_first_month": FACT_DISPLAY_FIRST_MONTH,
         "chart_min_mean_fleet": CHART_MIN_MEAN_FLEET,
         "chart_fields": chart_fields,
+        "scenario_id": scenario_id,
+        "historical_hazard_layer": (
+            "static+Ql(field-ref clip5)+raw-Kpod(U-shape)"
+            if scenario_id == C.STRESS_SCENARIO_ID and C.QL_HAZARD_ENABLED and C.KPOD_HAZARD_ENABLED
+            else (
+                "static+Ql(field-ref clip5)"
+                if scenario_id == C.STRESS_SCENARIO_ID and C.QL_HAZARD_ENABLED
+                else (
+                    "static+raw-Kpod(U-shape)"
+                    if scenario_id == C.STRESS_SCENARIO_ID and C.KPOD_HAZARD_ENABLED
+                    else ("static only; Ql/Kpod disabled" if scenario_id == C.STRESS_SCENARIO_ID else "none")
+                )
+            )
+        ),
         "global_pooled_share_by_field": fallback_share_by_field,
         # MODIFIED parameters, surfaced so the manual adjustments are never silent:
         "survival_weighted_fields": sorted(_SURVIVAL_WEIGHT_FIELDS),
         "calibration_factors_modified": dict(_CALIBRATION_FACTORS),
         "reporting_field_calibration_factors_modified": dict(_REPORTING_FIELD_CALIBRATION_FACTORS),
         "global_calibration_modified": "sum_of_reporting_field_calibrations",
+        "ql_hazard_firing_audit": ql_audit_summary,
         **fleet_info,
     }
     if catboost_diag:
@@ -1076,7 +1400,13 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
         "(«Отработанное время» > 0 и добыча нефти или жидкости > 0). "
         f"Факт — по «Свод» (Failure Flag=1), показан с "
         f"{result.coverage.get('fact_display_first_month', FACT_DISPLAY_FIRST_MONTH)}. "
-        "Прогноз модели (Weibull) по датам монтажа насосов — на всю историю."
+        "Валидационный график показывает условный месячный риск активного на начало "
+        "месяца парка до и после forecast_start; это не симуляция замен. "
+        f"Слой hazard: {result.coverage.get('historical_hazard_layer', 'none')}."
+    ])
+    ws.append([
+        "Прогноз/прогнозис добычи считается отдельно: renewal-симуляция с возвратом "
+        "скважины после downtime, расчетом потерь нефти и нагрузки ремонтов."
     ])
     ws.append([f"Покрытие: master={int(result.coverage['master_wells'])}, "
                f"Свод={int(result.coverage['svod_wells'])}, "
@@ -1100,7 +1430,11 @@ def write_sheets(workbook, result: FailureRateResult) -> None:
                 + ", ".join(f"{k}×{v:g}" for k, v in field_cal.items())
             )
             parts.append("ГЛОБАЛЬНО = сумма откалиброванных УН")
-        ws.append(["ВНИМАНИЕ — прогноз модели содержит ручные поправки. " + "; ".join(parts) + "."])
+        ws.append([
+            "ВНИМАНИЕ — прогноз модели содержит фиксированные прозрачные ручные "
+            "поправки; коэффициенты не пересчитываются при запуске. "
+            + "; ".join(parts) + "."
+        ])
     ws.append([])
 
     # ---- wide rate matrix: month | <field>_факт | <field>_прогноз ... ----

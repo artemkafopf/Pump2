@@ -7,9 +7,11 @@ exposure.  Missing bundles are neutral: callers keep the legacy behaviour.
 """
 from __future__ import annotations
 
+import bisect
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -55,9 +57,42 @@ class TimeMap:
         if self.frame.empty:
             self.uptime = pd.DataFrame()
             self.idle = pd.DataFrame()
+            self._uptime_lookup: dict[tuple[str, str, int], float] = {}
+            self._idle_lookup: dict[str, float] = {}
             return
         self.uptime = self.frame[self.frame["row_type"].eq("uptime")].copy()
         self.idle = self.frame[self.frame["row_type"].eq("idle_hazard")].copy()
+        # Precompute O(1) lookups once: predict_uptime/idle_fraction are called hundreds of
+        # thousands of times during a replay, and per-call DataFrame boolean-mask scans were
+        # the dominant cost.  These dicts preserve the exact first-match precedence.
+        self._uptime_lookup = self._build_uptime_lookup(self.uptime)
+        self._idle_lookup = self._build_idle_lookup(self.idle)
+
+    @staticmethod
+    def _build_uptime_lookup(uptime: pd.DataFrame) -> dict[tuple[str, str, int], float]:
+        lookup: dict[tuple[str, str, int], float] = {}
+        if uptime.empty:
+            return lookup
+        months = pd.to_numeric(uptime["calendar_month"], errors="coerce").fillna(-1).astype(int)
+        values = pd.to_numeric(uptime["uptime"], errors="coerce")
+        for field, band, cmonth, val in zip(
+            uptime["field"].astype(str), uptime["age_band"].astype(str), months, values
+        ):
+            # first row wins, matching the original ``.iloc[0]`` (uptime is not dropna'd)
+            lookup.setdefault((field, band, int(cmonth)), float(np.clip(val, 0.0, 1.0)))
+        return lookup
+
+    @staticmethod
+    def _build_idle_lookup(idle: pd.DataFrame) -> dict[str, float]:
+        lookup: dict[str, float] = {}
+        if idle.empty:
+            return lookup
+        values = pd.to_numeric(idle["idle_hazard_fraction"], errors="coerce")
+        for field, val in zip(idle["field"].astype(str), values):
+            if not np.isfinite(val):  # matches the original ``.dropna()`` (first non-null wins)
+                continue
+            lookup.setdefault(field, float(np.clip(val, 0.0, 1.0)))
+        return lookup
 
     @classmethod
     def missing(cls) -> "TimeMap":
@@ -82,43 +117,36 @@ class TimeMap:
         *,
         fallback: float,
     ) -> tuple[float, str]:
-        if self.uptime.empty:
+        if not self._uptime_lookup:
             return float(np.clip(fallback, 0.0, 1.0)), "legacy_uptime_factor"
         field = str(model_field or "GLOBAL")
         age_band = age_band_label(age_start)
+        cm = int(calendar_month)
         candidates = (
-            (field, age_band, int(calendar_month)),
+            (field, age_band, cm),
             (field, age_band, 0),
-            (field, "ALL", int(calendar_month)),
+            (field, "ALL", cm),
             (field, "ALL", 0),
-            ("GLOBAL", age_band, int(calendar_month)),
+            ("GLOBAL", age_band, cm),
             ("GLOBAL", age_band, 0),
-            ("GLOBAL", "ALL", int(calendar_month)),
+            ("GLOBAL", "ALL", cm),
             ("GLOBAL", "ALL", 0),
         )
-        for f, band, month in candidates:
-            m = (
-                self.uptime["field"].astype(str).eq(f)
-                & self.uptime["age_band"].astype(str).eq(band)
-                & (pd.to_numeric(self.uptime["calendar_month"], errors="coerce").fillna(-1).astype(int) == month)
-            )
-            if bool(m.any()):
-                value = float(self.uptime.loc[m, "uptime"].iloc[0])
-                return float(np.clip(value, 0.0, 1.0)), f"map:{f}:{band}:{month}"
+        for key in candidates:
+            value = self._uptime_lookup.get(key)
+            if value is not None:
+                return value, f"map:{key[0]}:{key[1]}:{key[2]}"
         return float(np.clip(fallback, 0.0, 1.0)), "legacy_uptime_factor"
 
     def idle_fraction(self, reporting_field: str | None, model_field: str | None) -> tuple[float, str]:
-        if self.idle.empty:
+        if not self._idle_lookup:
             return 0.0, "none"
-        keys = [str(reporting_field or ""), str(model_field or ""), "GLOBAL"]
-        for key in keys:
+        for key in (str(reporting_field or ""), str(model_field or ""), "GLOBAL"):
             if not key:
                 continue
-            m = self.idle["field"].astype(str).eq(key)
-            if bool(m.any()):
-                val = pd.to_numeric(self.idle.loc[m, "idle_hazard_fraction"], errors="coerce").dropna()
-                if not val.empty:
-                    return float(np.clip(val.iloc[0], 0.0, 1.0)), f"idle:{key}"
+            value = self._idle_lookup.get(key)
+            if value is not None:
+                return value, f"idle:{key}"
         return 0.0, "none"
 
 
@@ -130,9 +158,17 @@ def age_band_label(age_start: float) -> str:
     return AGE_BANDS[-1][0]
 
 
+@lru_cache(maxsize=4096)
 def _month_bounds(month: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     p = pd.Period(month, freq="M")
     return p.start_time, p.start_time + pd.offsets.MonthBegin(1)
+
+
+@lru_cache(maxsize=4096)
+def _month_meta(month: str) -> tuple[pd.Timestamp, pd.Timestamp, int, int]:
+    """(month_start, month_end, calendar_month 1..12, days_in_month) — cached per month."""
+    p = pd.Period(month, freq="M")
+    return p.start_time, p.start_time + pd.offsets.MonthBegin(1), int(p.month), int(p.days_in_month)
 
 
 def interval_slices(
@@ -157,17 +193,33 @@ def interval_slices(
     if not time_map.available:
         return []
 
+    # Only iterate months that can overlap [start, end]; ``months`` is sorted "YYYY-MM"
+    # strings, so the calendar month of start/end bounds the relevant slice.  Months
+    # outside this range have overlap <= 0 and contributed nothing (byte-identical).
+    ts_start = pd.Timestamp(start)
+    ts_end = pd.Timestamp(end)
+    lo = bisect.bisect_left(months, ts_start.strftime("%Y-%m"))
+    hi = bisect.bisect_right(months, ts_end.strftime("%Y-%m"))
+    relevant_months = months[lo:hi]
+
+    plan_months = getattr(plan, "months", ()) if plan is not None else ()
+    plan_months_set = set(plan_months)
+    op_frame = getattr(plan, "op_days", getattr(plan, "op_days_raw", None)) if plan is not None else None
+    cal_days_series = getattr(plan, "cal_days", None) if plan is not None else None
+    # idle fraction depends only on (reporting_field, model_field) -> constant per interval
+    idle_frac, idle_source = time_map.idle_fraction(reporting_field, model_field)
+
     raw: list[dict] = []
     running_age = 0.0
-    for month in months:
-        m_start, m_end = _month_bounds(month)
-        ov_start = max(pd.Timestamp(start), m_start)
-        ov_end = min(pd.Timestamp(end), m_end)
+    for month in relevant_months:
+        m_start, m_end, cal_month, days_in_month = _month_meta(month)
+        ov_start = max(ts_start, m_start)
+        ov_end = min(ts_end, m_end)
         overlap = float((ov_end - ov_start).days)
         if overlap <= 0:
             continue
 
-        in_plan_month = month in getattr(plan, "months", []) if plan is not None else False
+        in_plan_month = month in plan_months_set
         producing: bool | None = None
         plan_op = np.nan
         if in_plan_month:
@@ -178,9 +230,8 @@ def interval_slices(
                 and bool(active.at[code, month])
             )
             try:
-                op_frame = getattr(plan, "op_days", plan.op_days_raw)
-                cal_days = float(getattr(plan, "cal_days", pd.Series(dtype=float)).get(month, pd.Period(month, freq="M").days_in_month))
-                month_op = float(op_frame.at[code, month]) if code in op_frame.index and month in op_frame.columns else 0.0
+                cal_days = float(cal_days_series.get(month, days_in_month)) if cal_days_series is not None else float(days_in_month)
+                month_op = float(op_frame.at[code, month]) if op_frame is not None and code in op_frame.index and month in op_frame.columns else 0.0
                 plan_op = month_op * overlap / cal_days if cal_days > 0 else 0.0
             except Exception:
                 plan_op = np.nan
@@ -188,10 +239,9 @@ def interval_slices(
         uptime, source = time_map.predict_uptime(
             model_field,
             running_age,
-            pd.Period(month, freq="M").month,
+            cal_month,
             fallback=fallback_uptime,
         )
-        idle_frac, idle_source = time_map.idle_fraction(reporting_field, model_field)
         if in_plan_month and producing is True and np.isfinite(plan_op):
             weight = max(0.0, float(plan_op))
             source = "plan_actual_op_days"
