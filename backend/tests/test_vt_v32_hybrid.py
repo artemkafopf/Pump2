@@ -63,22 +63,31 @@ def test_ql_guard_flattens_below_the_guard_and_repins_at_reference():
     assert th[M._QL_PIN_IX] == pytest.approx(1.0)        # re-pinned at Ql=250
 
 
-def test_pooling_is_fleet_weighted_geometric_mean_for_ql_kpod_only():
+def test_only_kpod_is_pooled_ql_and_freq_stay_stratum_specific():
+    """Kpod pools (strata agree); Ql and freq must NOT (they genuinely differ)."""
     kp_ns = np.array([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
     kp_s = np.array([1.0, 1.0, 1.0, 8.0, 8.0, 8.0])
-    fr_ns = np.ones(len(M.FREQ_DEV_KNOTS))
     # must VARY across knots: build_model re-pins θ=1 at the reference, so a constant
-    # freq θ would (correctly) flatten to all-ones and the strata would look identical.
+    # θ would (correctly) flatten to all-ones and the strata would look identical.
+    ql_ns = np.array([0.8, 0.8, 1.0, 1.5, 1.7])
+    ql_s = np.array([0.9, 0.9, 1.0, 1.15, 1.15])
+    fr_ns = np.ones(len(M.FREQ_DEV_KNOTS))
     fr_s = np.array([1.3, 1.25, 1.2, 1.0, 1.0, 1.05])
     m = M.build_model({
-        "nonsour": _fit("nonsour", 300, {"Kpod": kp_ns, "freq_dev": fr_ns}),
-        "sour": _fit("sour", 100, {"Kpod": kp_s, "freq_dev": fr_s}),
+        "nonsour": _fit("nonsour", 300, {"Kpod": kp_ns, "Ql": ql_ns, "freq_dev": fr_ns}),
+        "sour": _fit("sour", 100, {"Kpod": kp_s, "Ql": ql_s, "freq_dev": fr_s}),
     })
+    assert M.POOLED_ARMS == ("Kpod",)
     # Kpod pooled -> identical across strata, = weighted geometric mean (0.75 / 0.25)
     assert np.allclose(m.theta[("Kpod", "nonsour")], m.theta[("Kpod", "sour")])
     assert m.theta[("Kpod", "nonsour")][-1] == pytest.approx(2.0 ** 0.75 * 8.0 ** 0.25)
-    # freq NOT pooled -> strata keep their own values
+    # Ql and freq NOT pooled -> strata keep their own values
+    assert not np.allclose(m.theta[("Ql", "nonsour")], m.theta[("Ql", "sour")])
     assert not np.allclose(m.theta[("freq_dev", "nonsour")], m.theta[("freq_dev", "sour")])
+    # ...and the Ql guard still applies per stratum
+    i47, i100 = M.QL_KNOTS.index(47.0), M.QL_KNOTS.index(100.0)
+    for s in ("nonsour", "sour"):
+        assert m.theta[("Ql", s)][i47] == pytest.approx(m.theta[("Ql", s)][i100])
 
 
 def test_compose_multiplies_thetas_and_beats_naive_rmst_chaining():

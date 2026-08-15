@@ -412,6 +412,19 @@ def attach_equipment(
     return merged.sort_values("_row").drop(columns="_row").reset_index(drop=True)
 
 
+def mc_cohort_mask(pop: pd.DataFrame) -> pd.Series:
+    """Rows passing the Мирнинский cohort rule — the mask behind :func:`apply_mc_cohort`.
+
+    Exposed separately so a caller that has to *report* the filter (a selection funnel)
+    counts the very same rows the filter drops, instead of re-deriving the rule.
+    """
+    if "install" not in pop.columns:
+        raise KeyError("apply_mc_cohort needs an `install` column")
+    start = pd.Timestamp(C.MC_INSTALL_COHORT_START)
+    is_mc = pop["field"].isin(C.MC_COHORT_FIELDS)
+    return ~is_mc | (pop["install"] >= start)
+
+
 def apply_mc_cohort(pop: pd.DataFrame) -> pd.DataFrame:
     """Restrict Мирнинский to installs on/after ``C.MC_INSTALL_COHORT_START``.
 
@@ -419,11 +432,7 @@ def apply_mc_cohort(pop: pd.DataFrame) -> pd.DataFrame:
     pre-2024 runs' later exposure and hides that recent runs are shorter.  Rows of other
     fields pass through untouched.
     """
-    if "install" not in pop.columns:
-        raise KeyError("apply_mc_cohort needs an `install` column")
-    start = pd.Timestamp(C.MC_INSTALL_COHORT_START)
-    is_mc = pop["field"].isin(C.MC_COHORT_FIELDS)
-    return pop[~is_mc | (pop["install"] >= start)].copy()
+    return pop[mc_cohort_mask(pop)].copy()
 
 
 def select(

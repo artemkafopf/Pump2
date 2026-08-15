@@ -19,10 +19,17 @@ Form (proportional hazards on a Weibull baseline)::
   an **overload-only dial**.
 * **θ_freq** — same TENT form at the nominal frequency.
 
-**Pooling (hybrid).**  ``Ql`` and ``Kpod`` are POOLED across strata (weighted geometric mean of
-θ at the knots, weights = stratum fleet size) because the strata agree there and the signal is
-weak; ``freq`` is kept STRATUM-SPECIFIC because pooling dilutes sour's real under-speed penalty
-into a fleet-wide value matching neither stratum.  Baseline/contractor are never pooled.
+**Pooling (hybrid).**  Only ``Kpod`` is POOLED across strata (weighted geometric mean of θ at
+the knots, weights = stratum fleet size) — there the two strata agree almost exactly and the
+signal is weak, so borrowing strength is free.  ``Ql`` and ``freq`` are kept STRATUM-SPECIFIC:
+
+* ``Ql`` — unpooled 2026-07-24.  The strata genuinely differ: nonsour keeps climbing to
+  θ≈1.64 at Ql 823 while sour saturates at θ≈1.16, i.e. high liquid rate is about twice as
+  damaging on nonsour in hazard terms.  A pooled curve sat between them and matched neither.
+* ``freq`` — pooling dilutes sour's real under-speed penalty into a fleet-wide value matching
+  neither stratum.
+
+Baseline and contractor are never pooled.
 
 **Applicability.**  θ is *clamped* outside the knot range (flat extrapolation).  ``APPLICABILITY``
 records the supported window; beyond it the returned θ is an assumption, not an estimate.
@@ -76,11 +83,27 @@ KPOD_PIN = 0.8
 FREQ_DEV_KNOTS = (-15.0, -10.0, -5.0, 0.0, 5.0, 10.0)
 FREQ_PIN = 0.0
 
-#: Arms pooled across strata (weighted geometric mean of θ); freq stays stratum-specific.
-POOLED_ARMS = ("Ql", "Kpod")
+#: Arms pooled across strata (weighted geometric mean of θ).  Only Kpod: the strata agree
+#: there.  Ql was unpooled 2026-07-24 (nonsour rises to ~1.64 vs sour saturating at ~1.16 —
+#: pooling matched neither); freq is stratum-specific for sour's under-speed penalty.
+POOLED_ARMS = ("Kpod",)
 
 #: Ridge on the polyline increments — keeps Kpod/freq MINOR, lets the primary Ql move.
 LAM_QL, LAM_KPOD, LAM_FREQ = 1.0, 6.0, 6.0
+
+#: Ql bands used to identify the contractor effect *within* rate (see
+#: :func:`contractor_hr_ql_stratified`).  brt and slb are badly imbalanced on Ql — slb sits at
+#: high rate, brt at low — so a contractor coefficient fitted jointly with a single global Ql
+#: slope leans on functional form instead of on overlap, and absorbs part of the rate effect.
+QL_BANDS = (0.0, 150.0, 250.0, 350.0, 500.0, 800.0, np.inf)
+
+#: How the contractor hazard is identified.
+#:   ``"joint"``          — estimate it alongside the Ql polyline (the original v3.2)
+#:   ``"ql_stratified"``  — estimate it first from a Ql-band-stratified partial likelihood,
+#:                          then hold it FIXED while the Ql layer is fitted (default since
+#:                          2026-07-27).  brt is only ever compared to slb inside a band, so
+#:                          the rate gradient stays with θ_Ql where it belongs.
+CONTRACTOR_MODE = "ql_stratified"
 
 #: Supported covariate window.  Outside it θ is clamped (flat) — an assumption, not a fit.
 APPLICABILITY = {
@@ -222,19 +245,56 @@ class StratumFit:
     eta_marginal: float
 
 
-def fit_stratum(g: pd.DataFrame) -> StratumFit:
-    """Constrained Weibull-PH MLE on complete-case rows of one stratum."""
+def contractor_hr_ql_stratified(g: pd.DataFrame, bands=QL_BANDS) -> dict:
+    """Contractor HR identified WITHIN Ql bands (band-stratified Cox partial likelihood).
+
+    Each band carries its own baseline hazard, so brt is only ever compared with slb at
+    comparable rate — the comparison the data can actually support.  Using bands rather than a
+    single overlap slice keeps every run: restricting to Ql 200–500 would drop over half the
+    events and leave ``oth`` too thin to estimate.
+
+    Measured on Vt 2026-07-27, slb's HR decays monotonically the harder Ql is controlled —
+    nonsour 1.40 (no Ql) → 1.34 (global slope) → 1.23 (banded) → 1.13 (overlap slice only),
+    with every adjusted CI covering 1 — while ``oth`` survives at 2.44–2.65 (p ≤ 0.001).  The
+    slb penalty was largely rate confounding; the oth penalty is real.
+    """
+    from lifelines import CoxPHFitter
+
+    d = g.dropna(subset=["ql"]).copy()
+    d["ql_band"] = pd.cut(pd.to_numeric(d["ql"], errors="coerce"),
+                          list(bands), labels=False).astype("Int64").astype(str)
+    cols = [CLOCK, EVENT_COL, "ql_band"] + list(CONTRACTOR_TERMS)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cph = CoxPHFitter().fit(d[cols], CLOCK, EVENT_COL, strata=["ql_band"])
+    return {cg: float(np.exp(cph.params_[cg])) for cg in CONTRACTOR_TERMS}
+
+
+def fit_stratum(g: pd.DataFrame, contractor_fixed: dict | None = None) -> StratumFit:
+    """Constrained Weibull-PH MLE on complete-case rows of one stratum.
+
+    ``contractor_fixed`` pins the contractor log-HRs (from
+    :func:`contractor_hr_ql_stratified`) instead of estimating them here, so the Ql polyline
+    is fitted against a contractor effect that was identified on overlap only.
+    """
     from lifelines import WeibullFitter
 
     cc = g.dropna(subset=["ql", "kpod_run", "freq_run"]).copy()
     args = (cc[CLOCK].to_numpy(float), cc[EVENT_COL].to_numpy(float),
             cc["ql"].to_numpy(float), cc["slb"].to_numpy(float), cc["oth"].to_numpy(float),
             cc["kpod_run"].to_numpy(float), cc["freq_dev"].to_numpy(float))
-    bounds = ([(0.05, 6.0), (np.log(5.0), np.log(5e4)), (-4.0, 4.0), (-4.0, 4.0)]
+    if contractor_fixed is None:
+        cb = [(-4.0, 4.0), (-4.0, 4.0)]
+    else:   # equal bounds pin the coefficient — L-BFGS-B keeps it at the fixed value
+        cb = [(float(np.log(contractor_fixed[cg])),) * 2 for cg in CONTRACTOR_TERMS]
+    bounds = ([(0.05, 6.0), (np.log(5.0), np.log(5e4))] + cb
               + [(0.0, 4.0)] * _N_INC)
     starts = [np.array([0.9, np.log(400.0), 0.0, 0.0] + [0.0] * _N_INC),
               np.array([1.1, np.log(300.0), 0.2, 0.6] + [0.05] * _N_INC),
               np.array([0.7, np.log(500.0), -0.2, 0.3] + [0.10] * _N_INC)]
+    if contractor_fixed is not None:            # start ON the pinned value, not outside it
+        for x0 in starts:
+            x0[2], x0[3] = cb[0][0], cb[1][0]
     best = None
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -352,10 +412,19 @@ class ModelRun:
 
 
 def run(*, as_of: pd.Timestamp | None = None, cached: pd.DataFrame | None = None,
-        write: bool = True) -> ModelRun:
-    """Fit the v3.2 hybrid model end-to-end and (optionally) write tables + figures."""
+        write: bool = True, contractor_mode: str | None = None) -> ModelRun:
+    """Fit the v3.2 hybrid model end-to-end and (optionally) write tables + figures.
+
+    ``contractor_mode`` defaults to :data:`CONTRACTOR_MODE`; pass ``"joint"`` to reproduce the
+    original v3.2, where the contractor coefficient was estimated alongside the Ql polyline.
+    """
+    mode = CONTRACTOR_MODE if contractor_mode is None else contractor_mode
     vt = prepare_frame(as_of=as_of, cached=cached)
-    fits = {s: fit_stratum(vt[vt["h2s_class"] == s]) for s in STRATA}
+    fits = {}
+    for s in STRATA:
+        g = vt[vt["h2s_class"] == s]
+        fixed = contractor_hr_ql_stratified(g) if mode == "ql_stratified" else None
+        fits[s] = fit_stratum(g, contractor_fixed=fixed)
     model = build_model(fits)
     baseline_table = _baseline_table(model)
     spec = _spec_table(model)
@@ -460,7 +529,7 @@ def _fig_multipliers(m: HybridModel, figures: Path) -> None:
             a.set_xlabel(labels[arm]); a.grid(alpha=.25); a.legend(fontsize=8)
     ax[0, 0].set_ylabel("θ (множитель риска)")
     ax[1, 0].set_ylabel("множитель RMST(0,730)")
-    fig.suptitle("Vt v3.2 гибрид: Ql и Kpod объединены по флоту; частота — по стратам; "
+    fig.suptitle("Vt v3.2 гибрид: Kpod объединён по флоту; Ql и частота — по стратам; "
                  "базовая линия своя у страты", fontsize=12.5)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     fig.savefig(figures / "v32_hybrid_multipliers.png", dpi=140)

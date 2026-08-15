@@ -49,7 +49,7 @@ def _h2s_class(field: str, h2s_proxy: float | None) -> str:
     return "nonsour"
 
 
-def load_mart_df(tte_col: str = "ttf_mix") -> pd.DataFrame:
+def load_mart_df(tte_col: str = "ttf_mix", mc_cohort: bool = True) -> pd.DataFrame:
     """Load mart__weibull_input and return a DataFrame ready for Phase 1 / Phase 2.
 
     Parameters
@@ -58,10 +58,18 @@ def load_mart_df(tte_col: str = "ttf_mix") -> pd.DataFrame:
         Column to use as time-to-event. Options:
           "ttf_mix"   — true operating days (capped at run_days); default
           "run_days"  — calendar days (for apples-to-apples comparison)
+    mc_cohort : bool
+        Default True: keep only Мирнинский runs INSTALLED on/after
+        ``production_risk.config.MC_INSTALL_COHORT_START`` (2024-01-01).  Every Mc
+        statistic is built from that cohort — pre-2023 Mc is the anomaly (2 failures vs
+        11.8 expected on 21 runs).  This is a cohort filter on the install date, not
+        left truncation of exposure.  Other fields are untouched.  Pass False only for
+        an explicitly labelled all-history contrast.
 
     Columns returned:
         tte           — values from tte_col; rows with tte <= 0 or NaN are dropped
         event         — 1=failure, 0=censored
+        install_date  — run install date (drives the Mc cohort filter)
         field         — raw field name from mart
         field_clean   — field with small fields pooled to "Other"
         h2s_class     — "sour" or "nonsour" (derived from h2s_proxy_mg_l + field)
@@ -83,6 +91,7 @@ def load_mart_df(tte_col: str = "ttf_mix") -> pd.DataFrame:
             field,
             pad,
             contractor,
+            install_date,
             event,
             run_days,
             ttf_true_best_days,
@@ -94,6 +103,14 @@ def load_mart_df(tte_col: str = "ttf_mix") -> pd.DataFrame:
         conn,
     )
     conn.close()
+    df["install_date"] = pd.to_datetime(df["install_date"], errors="coerce")
+
+    if mc_cohort:
+        from analysis.workflows.production_risk import config as _prc
+
+        start = pd.Timestamp(_prc.MC_INSTALL_COHORT_START)
+        is_mc = df["field"].isin(_prc.MC_COHORT_FIELDS)
+        df = df[~is_mc | (df["install_date"] >= start)].copy()
 
     # ── TTE from selected column ───────────────────────────────────────────────
     if tte_col not in df.columns:
